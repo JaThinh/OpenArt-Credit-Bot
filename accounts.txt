@@ -1,0 +1,5 @@
+# Cấu hình danh sách tài khoản đăng ký
+# Định dạng: email|password
+# Mỗi tài khoản nằm trên một dòng
+# Ví dụ:
+# abc@hungsmoke.site|MatKhau123!
