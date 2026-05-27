@@ -5,11 +5,14 @@ import httpx
 from playwright.async_api import async_playwright
 from playwright_stealth import Stealth
 
+# Lay thu muc chua file script hien tai lam goc
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+
 # ============ CAU HINH HE THONG & SELECTORS ============
 # Vui long kiem tra lai F12 tren OpenArt thuc te de dieu chinh cac Selector neu can.
 CONFIG = {
-    "ACCOUNTS_FILE": "accounts.txt",
-    "SUCCESS_FILE": "reg_success.txt",
+    "ACCOUNTS_FILE": os.path.join(BASE_DIR, "accounts.txt"),
+    "SUCCESS_FILE": os.path.join(BASE_DIR, "reg_success.txt"),
     "MAIL_API_BASE": "https://mail.cskh-group.com",
     
     # URL OpenArt
