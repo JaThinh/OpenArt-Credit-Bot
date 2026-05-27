@@ -31,6 +31,7 @@ CONFIG = {
 }
 
 CONFIG_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "config.json")
+ACCOUNTS_FILE_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "accounts.txt")
 
 def load_config():
     global CONFIG
@@ -184,12 +185,20 @@ async def wait_for_otp(email_address, worker_id=0):
     return None
 
 # ============ REGISTER ENGINE (Single account flow) ============
-async def register_one(worker_id, account_index, assigned_proxy):
+async def register_one(worker_id, account_index, assigned_proxy, custom_email=None, custom_password=None):
     global stats
     from camoufox.async_api import AsyncCamoufox
 
-    email_data = create_email()
-    email = email_data["email"]
+    # Sử dụng tài khoản tùy chỉnh từ file nếu có, nếu không thì tự sinh
+    if custom_email:
+        email = custom_email
+        password = custom_password
+        log(f"Sử dụng tài khoản từ file: {email}", "INFO", worker_id)
+    else:
+        email_data = create_email()
+        email = email_data["email"]
+        password = CONFIG["PASSWORD"]
+
     registered = False
     claimed = False
     start_time = time.time()
@@ -256,7 +265,7 @@ async def register_one(worker_id, account_index, assigned_proxy):
                 await inp.wait_for(state="visible", timeout=2000)
                 await inp.click()
                 await asyncio.sleep(0.05)
-                await inp.fill(CONFIG["PASSWORD"])
+                await inp.fill(password)
             except Exception:
                 continue
         await asyncio.sleep(0.2)
@@ -436,7 +445,7 @@ async def register_one(worker_id, account_index, assigned_proxy):
 
     # Tổng kết trạng thái và ghi log
     status_str = "REG+CLAIM_OK" if claimed else ("REG_OK" if registered else "FAIL")
-    await save_account(email, CONFIG["PASSWORD"], status_str)
+    await save_account(email, password, status_str)
     
     with lock:
         w["status"] = "done" if claimed else "fail"
@@ -476,13 +485,17 @@ async def worker_loop(worker_id, queue, total_accounts):
             continue
             
         account_idx = task_data["index"]
+        custom_email = task_data.get("email")
+        custom_password = task_data.get("password")
+        
         # Đảm bảo mỗi worker lấy đúng proxy được phân bổ
         assigned_proxy = get_worker_proxy(worker_id)
         
-        log(f"Nhận tài khoản thứ #{account_idx} (Proxy: {short_proxy(assigned_proxy)})", "INFO", worker_id)
+        target_display = custom_email if custom_email else "Tự sinh Email"
+        log(f"Nhận tài khoản thứ #{account_idx} ({target_display})", "INFO", worker_id)
         
         # Thực thi quy trình đăng ký
-        await register_one(worker_id, account_idx, assigned_proxy)
+        await register_one(worker_id, account_idx, assigned_proxy, custom_email, custom_password)
         
         queue.task_done()
         
@@ -499,30 +512,75 @@ async def worker_loop(worker_id, queue, total_accounts):
 
 
 async def queue_producer(queue):
-    """Task nền sản sinh công việc không giới hạn khi total_accounts = 0."""
+    """Task nền sản sinh công việc không giới hạn khi total_accounts = 0 và không dùng file accounts.txt."""
     idx = 1
     while not should_stop:
         if queue.qsize() < 10:
-            await queue.put({"index": idx})
+            await queue.put({"index": idx, "email": None, "password": None})
             idx += 1
         else:
             await asyncio.sleep(0.2)
 
 
+def read_local_accounts():
+    """Đọc tệp accounts.txt cục bộ và trả về danh sách dict."""
+    acc_list = []
+    if not os.path.exists(ACCOUNTS_FILE_PATH):
+        return acc_list
+    try:
+        with open(ACCOUNTS_FILE_PATH, "r", encoding="utf-8") as f:
+            for line in f:
+                line = line.strip()
+                if not line or line.startswith("#"):
+                    continue
+                parts = line.split("|")
+                if len(parts) >= 2:
+                    acc_list.append({
+                        "email": parts[0].strip(),
+                        "password": parts[1].strip()
+                    })
+    except Exception as e:
+        print(f"Lỗi đọc accounts.txt: {e}")
+    return acc_list
+
+
 async def run_pool(concurrency, total_accounts):
     global should_stop, is_paused, bot_state
     
-    # Khởi tạo hàng đợi công việc
+    # Khởi động hàng đợi
     queue = asyncio.Queue()
     producer_task = None
     
-    if total_accounts > 0:
-        log(f"Khởi tạo hàng đợi với {total_accounts} tài khoản.", "INFO")
-        for idx in range(1, total_accounts + 1):
-            await queue.put({"index": idx})
+    # Đọc tài khoản cục bộ từ accounts.txt nếu có
+    local_accounts = read_local_accounts()
+    
+    if local_accounts:
+        log(f"Phát hiện tệp accounts.txt chứa {len(local_accounts)} tài khoản.", "SUCCESS")
+        
+        # Xác định số lượng tài khoản cần chạy
+        limit = total_accounts if total_accounts > 0 else len(local_accounts)
+        limit = min(limit, len(local_accounts))
+        
+        log(f"Nạp {limit} tài khoản từ accounts.txt vào hàng đợi...", "INFO")
+        for idx in range(1, limit + 1):
+            acc = local_accounts[idx - 1]
+            await queue.put({
+                "index": idx,
+                "email": acc["email"],
+                "password": acc["password"]
+            })
+            
+        # Điều chỉnh lại tổng số acc chạy thực tế của phiên
+        total_accounts = limit
     else:
-        log("Hệ thống chạy ở chế độ VÔ HẠN tài khoản.", "INFO")
-        producer_task = asyncio.create_task(queue_producer(queue))
+        # Nếu không có file accounts.txt, chạy ở chế độ Tự sinh Email
+        if total_accounts > 0:
+            log(f"Khởi tạo hàng đợi tự sinh với {total_accounts} tài khoản.", "INFO")
+            for idx in range(1, total_accounts + 1):
+                await queue.put({"index": idx, "email": None, "password": None})
+        else:
+            log("Chạy ở chế độ VÔ HẠN tài khoản tự sinh.", "INFO")
+            producer_task = asyncio.create_task(queue_producer(queue))
         
     # Tạo các worker task hoạt động song song
     worker_tasks = []
@@ -530,14 +588,12 @@ async def run_pool(concurrency, total_accounts):
         task = asyncio.create_task(worker_loop(w_id, queue, total_accounts))
         worker_tasks.append(task)
         
-    # Chờ tất cả worker hoàn thành hoặc hệ thống dừng
+    # Chờ các worker kết thúc
     if total_accounts > 0:
         await asyncio.gather(*worker_tasks, return_exceptions=True)
     else:
-        # Chạy vô hạn cho tới khi nhấn STOP
         while not should_stop:
             await asyncio.sleep(1.0)
-        # Hủy các task đang chờ
         for task in worker_tasks:
             task.cancel()
         if producer_task:
@@ -691,7 +747,7 @@ def start_gui():
     title_group = ctk.CTkFrame(header, fg_color=PANEL, corner_radius=0)
     title_group.grid(row=0, column=0, sticky="w", padx=12, pady=8)
     label(title_group, " █ O P E N A R T . C R E D I T . B O T ░░░", 15, GREEN, "bold").pack(side="left")
-    label(title_group, "v3.0 // worker-pool // async", 10, GREEN_DARK, "bold").pack(side="left", padx=(12, 0))
+    label(title_group, "v3.1 // worker-pool // async", 10, GREEN_DARK, "bold").pack(side="left", padx=(12, 0))
 
     lbl_system_status = label(header, "[ OFFLINE ]", 13, RED, "bold")
     lbl_system_status.grid(row=0, column=2, sticky="e", padx=14, pady=8)
@@ -764,6 +820,52 @@ def start_gui():
     row3 = ctk.CTkFrame(config_frame, fg_color=BG, corner_radius=0)
     row3.grid(row=2, column=0, sticky="ew", padx=10, pady=4)
     label(row3, "[proxy list]:", 11, GREEN, "bold", width=118, anchor="w").pack(side="left")
+    
+    # Hàm xử lý tải proxy từ Github dạng raw
+    def download_github_proxies():
+        log("Đang kết nối GitHub để tải danh sách proxy...", "WARN")
+        try:
+            url = "https://raw.githubusercontent.com/TheSpeedX/SOCKS-List/master/http.txt"
+            req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
+            with urllib.request.urlopen(req, timeout=15) as resp:
+                proxy_content = resp.read().decode("utf-8")
+            
+            # Trích xuất danh sách proxy
+            proxies_fetched = [
+                line.strip() for line in proxy_content.splitlines()
+                if line.strip() and not line.strip().startswith("#")
+            ]
+            
+            if proxies_fetched:
+                app.after(0, lambda: txt_proxy.delete("1.0", tk.END))
+                app.after(0, lambda: txt_proxy.insert(tk.END, "\n".join(proxies_fetched)))
+                log(f"Tải thành công {len(proxies_fetched)} Proxy HTTP từ GitHub!", "SUCCESS")
+                app.after(100, refresh_config_from_gui)
+            else:
+                log("Tải thành công nhưng danh sách rỗng.", "WARN")
+        except Exception as e:
+            log(f"Không thể tải proxy từ GitHub: {e}", "ERROR")
+
+    def trigger_github_proxy_fetch():
+        t = threading.Thread(target=download_github_proxies, daemon=True)
+        t.start()
+
+    # Nút bấm tải proxy từ GitHub
+    ctk.CTkButton(
+        row3,
+        text="[TẢI PROXY GITHUB]",
+        width=132,
+        height=22,
+        fg_color=BG,
+        hover_color=GREEN_DIM,
+        border_color=GREEN,
+        border_width=1,
+        text_color=GREEN_SOFT,
+        font=(MONO, 9, "bold"),
+        corner_radius=0,
+        command=trigger_github_proxy_fetch,
+    ).pack(side="left", padx=(10, 4))
+
     label(row3, "// mỗi dòng 1 proxy -> phân bổ worker theo dạng round-robin", 10, GREEN_DARK, "bold").pack(side="left", padx=(4, 0))
 
     txt_proxy = ctk.CTkTextbox(
@@ -1089,7 +1191,7 @@ def start_gui():
 
     append_log_line(f"[{datetime.now().strftime('%H:%M:%S')}] > hệ thống sẵn sàng. nhấn RUN để khởi chạy.")
 
-    # Cập nhật GUI mỗi 500ms thay vì 600ms
+    # Cập nhật GUI mỗi 500ms
     def update_gui():
         stat_labels["total"].configure(text=f"{stats['total']:03d}")
         stat_labels["success"].configure(text=f"{stats['success']:03d}")
