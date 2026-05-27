@@ -1,0 +1,11 @@
+# Tệp log tài khoản
+success_accounts.txt
+accounts_*.txt
+*.log
+
+# Môi trường ảo Python
+venv/
+.venv/
+env/
+__pycache__/
+*.pyc
