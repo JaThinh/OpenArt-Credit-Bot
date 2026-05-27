@@ -10,7 +10,7 @@ import urllib.request
 from datetime import datetime
 from urllib.parse import unquote, urlparse
 
-# ============ CẤU HÌNH MẶC ĐỊNH ============
+# ============ CẤU HÌNH MẶC ĐỀNH ============
 CONFIG = {
     "MAIL_API_BASE": "https://mail.cskh-group.com",
     "MAIL_DOMAIN": "cskh-group.com",
@@ -32,6 +32,9 @@ CONFIG = {
 
 CONFIG_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "config.json")
 ACCOUNTS_FILE_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "accounts.txt")
+
+# Danh sách các domain được tải từ API
+AVAILABLE_DOMAINS = ["cskh-group.com"]
 
 def load_config():
     global CONFIG
@@ -747,7 +750,7 @@ def start_gui():
     title_group = ctk.CTkFrame(header, fg_color=PANEL, corner_radius=0)
     title_group.grid(row=0, column=0, sticky="w", padx=12, pady=8)
     label(title_group, " █ O P E N A R T . C R E D I T . B O T ░░░", 15, GREEN, "bold").pack(side="left")
-    label(title_group, "v3.1 // worker-pool // async", 10, GREEN_DARK, "bold").pack(side="left", padx=(12, 0))
+    label(title_group, "v3.2 // worker-pool // async", 10, GREEN_DARK, "bold").pack(side="left", padx=(12, 0))
 
     lbl_system_status = label(header, "[ OFFLINE ]", 13, RED, "bold")
     lbl_system_status.grid(row=0, column=2, sticky="e", padx=14, pady=8)
@@ -791,10 +794,26 @@ def start_gui():
     ent_total_accounts.grid(row=0, column=3, padx=(5, 14))
     ent_total_accounts.insert(0, "20")
 
+    # Domain Dropdown CTkOptionMenu
     label(row1, "[domain]:", 11, GREEN, "bold").grid(row=0, column=4, sticky="w")
-    ent_domain = entry(row1, 170)
-    ent_domain.grid(row=0, column=5, padx=(5, 14), sticky="w")
-    ent_domain.insert(0, CONFIG["MAIL_DOMAIN"])
+    opt_domain = ctk.CTkOptionMenu(
+        row1,
+        width=170,
+        height=26,
+        fg_color=BG,
+        button_color=GREEN_DIM,
+        button_hover_color=GREEN,
+        dropdown_fg_color=BG,
+        dropdown_hover_color=GREEN_DIM,
+        dropdown_text_color=GREEN_SOFT,
+        text_color=GREEN_SOFT,
+        font=(MONO, 11),
+        dropdown_font=(MONO, 11),
+        corner_radius=0,
+        values=AVAILABLE_DOMAINS
+    )
+    opt_domain.grid(row=0, column=5, padx=(5, 14), sticky="w")
+    opt_domain.set(CONFIG["MAIL_DOMAIN"])
 
     label(row1, "[delay]:", 11, GREEN, "bold").grid(row=0, column=6, sticky="w")
     ent_delay = entry(row1, 65)
@@ -928,7 +947,7 @@ def start_gui():
 
     def refresh_config_from_gui():
         CONFIG["CONCURRENCY"] = parse_int(ent_concurrency.get(), CONFIG["CONCURRENCY"], 1)
-        CONFIG["MAIL_DOMAIN"] = ent_domain.get().strip() or CONFIG["MAIL_DOMAIN"]
+        CONFIG["MAIL_DOMAIN"] = opt_domain.get().strip() or CONFIG["MAIL_DOMAIN"]
         CONFIG["DELAY_BETWEEN_ACCOUNTS"] = parse_float(ent_delay.get(), CONFIG["DELAY_BETWEEN_ACCOUNTS"], 0)
         CONFIG["HEADLESS"] = bool(chk_headless_var.get())
         CONFIG["MINIMIZE_TASKBAR"] = bool(chk_minimize_var.get())
@@ -1190,6 +1209,41 @@ def start_gui():
     ).grid(row=0, column=1, sticky="e")
 
     append_log_line(f"[{datetime.now().strftime('%H:%M:%S')}] > hệ thống sẵn sàng. nhấn RUN để khởi chạy.")
+
+    # Tải danh sách domain từ API mail
+    def load_api_domains():
+        log("Đang tải danh sách domain từ API mail...", "INFO")
+        try:
+            url = f"{CONFIG['MAIL_API_BASE']}/api/domains"
+            req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
+            with urllib.request.urlopen(req, timeout=10) as resp:
+                data = json.loads(resp.read())
+            
+            domains = data.get("domains", [])
+            if domains:
+                global AVAILABLE_DOMAINS
+                AVAILABLE_DOMAINS.clear()
+                AVAILABLE_DOMAINS.extend(domains)
+                
+                # Cập nhật menu lựa chọn
+                app.after(0, lambda: opt_domain.configure(values=AVAILABLE_DOMAINS))
+                # Set domain mặc định nếu có trong CONFIG
+                if CONFIG["MAIL_DOMAIN"] in AVAILABLE_DOMAINS:
+                    app.after(0, lambda: opt_domain.set(CONFIG["MAIL_DOMAIN"]))
+                else:
+                    app.after(0, lambda: opt_domain.set(AVAILABLE_DOMAINS[0]))
+                log(f"Đã tải {len(domains)} domain thành công!", "SUCCESS")
+            else:
+                log("API không trả về domain nào.", "WARN")
+        except Exception as e:
+            log(f"Không thể kết nối API lấy domain: {e}", "ERROR")
+
+    def trigger_domain_load():
+        t = threading.Thread(target=load_api_domains, daemon=True)
+        t.start()
+
+    # Kích hoạt tải domain ngầm khi mở app
+    trigger_domain_load()
 
     # Cập nhật GUI mỗi 500ms
     def update_gui():
