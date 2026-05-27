@@ -5,8 +5,8 @@ import httpx
 from playwright.async_api import async_playwright
 from playwright_stealth import Stealth
 
-# ============ CẤU HÌNH HỆ THỐNG & SELECTORS ============
-# Vui lòng kiểm tra lại F12 trên OpenArt thực tế để điều chỉnh các Selector nếu cần.
+# ============ CAU HINH HE THONG & SELECTORS ============
+# Vui long kiem tra lai F12 tren OpenArt thuc te de dieu chinh cac Selector neu can.
 CONFIG = {
     "ACCOUNTS_FILE": "accounts.txt",
     "SUCCESS_FILE": "reg_success.txt",
@@ -16,36 +16,36 @@ CONFIG = {
     "LOGIN_URL": "https://openart.ai/login",
     "SIGNUP_URL": "https://openart.ai/signup",
     
-    # Selectors cho form đăng ký
-    "SELECTOR_EMAIL_INPUT": 'input[type="email"]', # Ô nhập Email
-    "SELECTOR_PASSWORD_INPUT": 'input[type="password"]', # Ô nhập Mật khẩu
+    # Selectors cho form dang ky
+    "SELECTOR_EMAIL_INPUT": 'input[type="email"]', # O nhap Email
+    "SELECTOR_PASSWORD_INPUT": 'input[type="password"]', # O nhap Mat khau
     
-    # Nút bấm submit đăng ký (Có thể dùng text "Sign Up" / "Continue" / "Register")
+    # Nut bam submit dang ky (Co the dung text "Sign Up" / "Continue" / "Register")
     "SELECTOR_SUBMIT_BUTTON": 'button:has-text("Sign Up"), button:has-text("Continue"), button:has-text("Register")',
     
-    # Selector cho ô nhập mã OTP (nếu OpenArt yêu cầu nhập mã OTP 6 số)
-    # OpenArt thường sử dụng 6 ô nhập mã độc lập hoặc 1 ô input chung.
-    "SELECTOR_OTP_INPUT_CONTAINER": 'input[maxlength="1"]', # Trường hợp 6 ô input đơn lẻ
-    "SELECTOR_OTP_SINGLE_INPUT": 'input[autocomplete="one-time-code"], input[name*="code" i], input[name*="otp" i]', # Trường hợp 1 ô input chung
+    # Selector cho o nhap ma OTP (neu OpenArt yeu cau nhap ma OTP 6 so)
+    # OpenArt thuong su dung 6 o nhap ma doc lap hoac 1 o input chung.
+    "SELECTOR_OTP_INPUT_CONTAINER": 'input[maxlength="1"]', # Truong hop 6 o input don le
+    "SELECTOR_OTP_SINGLE_INPUT": 'input[autocomplete="one-time-code"], input[name*="code" i], input[name*="otp" i]', # Truong hop 1 o input chung
     
-    # Nút bấm Xác minh OTP
+    # Nut bam Xac minh OTP
     "SELECTOR_VERIFY_BUTTON": 'button:has-text("Verify"), button:has-text("Continue"), button:has-text("Submit")',
     
-    # Chờ nhận Email
-    "OTP_MAX_ATTEMPTS": 12,        # Số lần thử check mail tối đa
-    "OTP_POLL_INTERVAL": 5,        # Thời gian chờ giữa mỗi lần check mail (giây)
+    # Cho nhan Email
+    "OTP_MAX_ATTEMPTS": 12,        # So lan thu check mail toi da
+    "OTP_POLL_INTERVAL": 5,        # Thoi gian cho giua moi lan check mail (giay)
 }
 
-# ============ MODULE 1: ĐỌC/GHI FILE TÀI KHOẢN BẤT ĐỒNG BỘ ============
+# ============ MODULE 1: DOC/GHI FILE TAI KHOAN BAT DONG BO ============
 async def read_accounts(file_path: str) -> list[dict]:
-    """Đọc danh sách tài khoản từ file accounts.txt."""
+    """Doc danh sach tai khoan tu file accounts.txt."""
     accounts = []
     if not os.path.exists(file_path):
-        print(f"[-] Không tìm thấy file nguồn tài khoản: {file_path}")
+        print(f"[-] Khong tim thay file nguon tai khoan: {file_path}")
         return accounts
 
     try:
-        # Sử dụng asyncio.to_thread để tránh blocking khi đọc file lớn
+        # Su dung asyncio.to_thread de tranh blocking khi doc file lon
         def read_file_sync():
             acc_list = []
             with open(file_path, "r", encoding="utf-8") as f:
@@ -62,31 +62,31 @@ async def read_accounts(file_path: str) -> list[dict]:
             return acc_list
 
         accounts = await asyncio.to_thread(read_file_sync)
-        print(f"[+] Đã tải thành công {len(accounts)} tài khoản từ file.")
+        print(f"[+] Da tai thanh cong {len(accounts)} tai khoan tu file.")
     except Exception as e:
-        print(f"[-] Lỗi khi đọc file tài khoản: {e}")
+        print(f"[-] Loi khi doc file tai khoan: {e}")
     return accounts
 
 async def save_success_account(email: str, password: str, file_path: str):
-    """Ghi nhận tài khoản đăng ký thành công vào file success."""
+    """Ghi nhan tai khoan dang ky thanh cong vao file success."""
     try:
         def write_sync():
             with open(file_path, "a", encoding="utf-8") as f:
                 f.write(f"{email}|{password}\n")
         await asyncio.to_thread(write_sync)
-        print(f"[+] Đã lưu tài khoản thành công: {email}")
+        print(f"[+] Da luu tai khoan thanh cong: {email}")
     except Exception as e:
-        print(f"[-] Không thể ghi file lưu thành công cho {email}: {e}")
+        print(f"[-] Khong the ghi file luu thanh cong cho {email}: {e}")
 
 
-# ============ MODULE 2: GỌI API MAIL HỆ THỐNG (HTTPX) ============
+# ============ MODULE 2: GOI API MAIL HE THONG (HTTPX) ============
 async def fetch_activation_data(email: str) -> dict:
     """
-    Gọi API check hòm thư để lấy OTP 6 số hoặc Link kích hoạt từ OpenArt.
-    Trả về dict dạng: {"otp": "123456", "link": None} hoặc {"otp": None, "link": "https://..."}
+    Goi API check hom thu de lay OTP 6 so hoac Link kich hoat tu OpenArt.
+    Tra ve dict dang: {"otp": "123456", "link": None} hoac {"otp": None, "link": "https://..."}
     """
     url = f"{CONFIG['MAIL_API_BASE']}/api/inbox/{email}"
-    print(f"[*] Đang kiểm tra hộp thư của: {email}...")
+    print(f"[*] Dang kiem tra hop thu cua: {email}...")
 
     async with httpx.AsyncClient(timeout=10.0) as client:
         for attempt in range(1, CONFIG["OTP_MAX_ATTEMPTS"] + 1):
@@ -96,72 +96,72 @@ async def fetch_activation_data(email: str) -> dict:
                     data = response.json()
                     messages = data.get("messages", data.get("emails", []))
                     
-                    # Tìm mail từ openart.ai
+                    # Tim mail tu openart.ai
                     for msg in messages:
                         sender = msg.get("from", "").lower()
                         subject = msg.get("subject", "").lower()
                         text_content = msg.get("text", "")
                         html_content = msg.get("html", "")
                         
-                        # Kết hợp cả text và html để quét regex
+                        # Ket hop ca text va html de quet regex
                         full_content = f"{subject} {text_content} {html_content}"
                         
                         if "openart" in sender or "openart" in subject:
-                            # 1. Tìm Link kích hoạt chứa openart.ai
+                            # 1. Tim Link kich hoat chua openart.ai
                             link_match = re.search(r"https://openart\.ai/[^\s\"'>]+", full_content)
                             if link_match:
                                 link = link_match.group(0)
-                                print(f"[+] Tìm thấy link kích hoạt: {link}")
+                                print(f"[+] Tim thay link kich hoat: {link}")
                                 return {"otp": None, "link": link}
 
-                            # 2. Tìm mã OTP (6 số)
+                            # 2. Tim ma OTP (6 so)
                             otp_match = re.search(r"\b\d{6}\b", full_content)
                             if otp_match:
                                 otp = otp_match.group(0)
-                                print(f"[+] Tìm thấy mã OTP: {otp}")
+                                print(f"[+] Tim thay ma OTP: {otp}")
                                 return {"otp": otp, "link": None}
                 
-                print(f"[*] (Lần thử {attempt}/{CONFIG['OTP_MAX_ATTEMPTS']}) Chưa nhận được mail xác nhận. Chờ 5s...")
+                print(f"[*] (Lan thu {attempt}/{CONFIG['OTP_MAX_ATTEMPTS']}) Chua nhan duoc mail xac nhan. Cho 5s...")
             except Exception as e:
-                print(f"[-] (Lần thử {attempt}) Lỗi kết nối API Mail: {e}")
+                print(f"[-] (Lan thu {attempt}) Loi ket noi API Mail: {e}")
                 
             await asyncio.sleep(CONFIG["OTP_POLL_INTERVAL"])
             
-    print(f"[-] Hết thời gian chờ! Không nhận được email xác nhận từ OpenArt cho: {email}")
+    print(f"[-] Het thoi gian cho! Khong nhan duoc email xac nhan tu OpenArt cho: {email}")
     return {"otp": None, "link": None}
 
 
 # ============ MODULE 3: BROWSER AUTOMATION (PLAYWRIGHT) ============
 async def process_registration(email: str, password: str) -> bool:
-    """Thực thi chu trình đăng ký bằng Playwright cho 1 tài khoản."""
+    """Thuc thi chu trinh dang ky bang Playwright cho 1 tai khoan."""
     print(f"\n==================================================")
-    print(f"[*] Bắt đầu xử lý đăng ký tài khoản: {email}")
+    print(f"[*] Bat dau xu ly dang ky tai khoan: {email}")
     print(f"==================================================")
 
-    # Khởi tạo Stealth
+    # Khoi tao Stealth
     stealth = Stealth()
 
     async with async_playwright() as p:
-        # Khởi chạy Chromium (headless=False để dễ giám sát)
+        # Khoi chay Chromium (headless=False de de giam sat)
         browser = await p.chromium.launch(headless=False)
         
-        # Thiết lập context và user agent sạch để bypass Cloudflare
+        # Thiet lap context va user agent sach de bypass Cloudflare
         context = await browser.new_context(
             user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
             viewport={"width": 1280, "height": 800}
         )
         
         page = await context.new_page()
-        # Áp dụng Stealth để che dấu Playwright
+        # Ap dung Stealth de che dau Playwright
         await stealth.apply_stealth_async(page)
 
         try:
-            # 1. Đi tới trang Login/Signup
-            print("[*] Đang điều hướng tới OpenArt Login...")
+            # 1. Di toi trang Login/Signup
+            print("[*] Dang dieu huong toi OpenArt Login...")
             await page.goto(CONFIG["LOGIN_URL"], wait_until="domcontentloaded", timeout=40000)
             await asyncio.sleep(2.0)
 
-            # Chuyển sang form Đăng ký (nếu trang mặc định đang là Login)
+            # Chuyen sang form Dang ky (neu trang mac dinh dang la Login)
             if "signup" not in page.url:
                 try:
                     signup_tab = page.locator('a[href*="signup"], button:has-text("Sign up"), button:has-text("Register")').first
@@ -169,66 +169,66 @@ async def process_registration(email: str, password: str) -> bool:
                         await signup_tab.click()
                         await asyncio.sleep(1.0)
                 except Exception:
-                    print("[*] Chuyển hướng trực tiếp tới trang Signup...")
+                    print("[*] Chuyen huong truc tiep toi trang Signup...")
                     await page.goto(CONFIG["SIGNUP_URL"], wait_until="domcontentloaded", timeout=30000)
 
-            # 2. Điền email vào form
-            print("[*] Điền thông tin Email...")
+            # 2. Dien email vao form
+            print("[*] Dien thong tin Email...")
             email_input = page.locator(CONFIG["SELECTOR_EMAIL_INPUT"]).first
             await email_input.wait_for(state="visible", timeout=15000)
             await email_input.click()
             await email_input.fill(email)
             await asyncio.sleep(0.5)
 
-            # 3. Điền mật khẩu
-            print("[*] Điền thông tin Password...")
+            # 3. Dien mat khau
+            print("[*] Dien thong tin Password...")
             password_input = page.locator(CONFIG["SELECTOR_PASSWORD_INPUT"]).first
             await password_input.wait_for(state="visible", timeout=5000)
             await password_input.click()
             await password_input.fill(password)
             await asyncio.sleep(0.5)
 
-            # 4. Click Submit Đăng ký
-            print("[*] Bấm nút Submit Đăng ký...")
+            # 4. Click Submit Dang ky
+            print("[*] Bam nut Submit Dang ky...")
             submit_btn = page.locator(CONFIG["SELECTOR_SUBMIT_BUTTON"]).first
             await submit_btn.wait_for(state="visible", timeout=5000)
             await submit_btn.click()
             
-            # Chờ một lúc để hệ thống OpenArt gửi email xác nhận đi
+            # Cho mot luc de he thong OpenArt gui email xac nhan di
             await asyncio.sleep(5.0)
 
-            # 5. Gọi API Mail hệ thống lấy thông tin OTP hoặc Link
+            # 5. Goi API Mail he thong lay thong tin OTP hoac Link
             activation_data = await fetch_activation_data(email)
             
-            # Trường hợp 1: Nhận được Link kích hoạt
+            # Truong hop 1: Nhan duoc Link kich hoat
             if activation_data["link"]:
-                print("[*] Tiến hành xác thực bằng Link kích hoạt...")
-                # Mở tab mới chạy link kích hoạt
+                print("[*] Tien hanh xac thuc bang Link kich hoat...")
+                # Mo tab moi chay link kich hoat
                 activation_page = await context.new_page()
                 await stealth.apply_stealth_async(activation_page)
                 await activation_page.goto(activation_data["link"], wait_until="domcontentloaded", timeout=40000)
                 await asyncio.sleep(5.0)
-                print("[+] Xác thực qua Link hoàn tất.")
+                print("[+] Xac thuc qua Link hoan tat.")
                 await activation_page.close()
                 await browser.close()
                 return True
 
-            # Trường hợp 2: Nhận được mã OTP 6 số
+            # Truong hop 2: Nhan duoc ma OTP 6 so
             elif activation_data["otp"]:
                 otp_code = activation_data["otp"]
-                print(f"[*] Tiến hành nhập mã OTP: {otp_code}...")
+                print(f"[*] Tien hanh nhap ma OTP: {otp_code}...")
 
-                # Kiểm tra dạng ô nhập OTP: Nhiều ô đơn lẻ hay 1 ô chung
+                # Kiem tra dang o nhap OTP: Nhieu o don le hay 1 o chung
                 otp_inputs = page.locator(CONFIG["SELECTOR_OTP_INPUT_CONTAINER"])
                 otp_count = await otp_inputs.count()
 
                 if otp_count >= 6:
-                    print("[*] Điền OTP vào 6 ô độc lập...")
+                    print("[*] Dien OTP vao 6 o doc lap...")
                     for idx in range(6):
                         await otp_inputs.nth(idx).fill(otp_code[idx])
                         await asyncio.sleep(0.1)
                 else:
-                    print("[*] Điền OTP vào ô input chung...")
+                    print("[*] Dien OTP vao o input chung...")
                     single_otp_input = page.locator(CONFIG["SELECTOR_OTP_SINGLE_INPUT"]).first
                     await single_otp_input.wait_for(state="visible", timeout=5000)
                     await single_otp_input.click()
@@ -236,71 +236,71 @@ async def process_registration(email: str, password: str) -> bool:
 
                 await asyncio.sleep(0.5)
 
-                # Bấm xác nhận OTP
+                # Bam xac nhan OTP
                 verify_btn = page.locator(CONFIG["SELECTOR_VERIFY_BUTTON"]).first
                 if await verify_btn.is_visible(timeout=3000):
                     await verify_btn.click()
                 
-                # Đợi hệ thống phản hồi xác nhận thành công
+                # Doi he thong phan hoi xac nhan thanh cong
                 await asyncio.sleep(6.0)
-                print("[+] Xác thực OTP hoàn tất.")
+                print("[+] Xac thuc OTP hoan tat.")
                 await browser.close()
                 return True
 
             else:
-                print("[-] Đăng ký thất bại do không có thông tin xác thực từ Email.")
+                print("[-] Dang ky that bai do khong co thong tin xac thuc tu Email.")
                 await browser.close()
                 return False
 
         except Exception as e:
-            print(f"[-] Gặp lỗi trong quá trình tự động hóa trình duyệt: {e}")
+            print(f"[-] Gap loi trong qua trinh tu dong hoa trinh duyet: {e}")
             await browser.close()
             return False
 
 
-# ============ MODULE 4: HÀM ĐIỀU PHỐI CHÍNH (MAIN PROCESS) ============
+# ============ MODULE 4: HAM DIEU PHOI CHINH (MAIN PROCESS) ============
 async def main():
     print("=" * 60)
     print("      OPENART.AI AUTO REGISTER SYSTEM - PLAYWRIGHT")
     print("=" * 60)
 
-    # 1. Đọc danh sách tài khoản cần đăng ký
+    # 1. Doc danh sach tai khoan can dang ky
     accounts = await read_accounts(CONFIG["ACCOUNTS_FILE"])
     if not accounts:
-        print("[-] Không có tài khoản nào được nạp hoặc file trống. Dừng chương trình.")
+        print("[-] Khong co tai khoan nao duoc nap hoac file trong. Dung chuong trinh.")
         return
 
     success_count = 0
     fail_count = 0
 
-    # 2. Lặp qua từng tài khoản để thực hiện đăng ký tuần tự
+    # 2. Lap qua tung tai khoan de thuc hien dang ky tuan tu
     for idx, acc in enumerate(accounts, start=1):
         email = acc["email"]
         password = acc["password"]
         
-        print(f"\n[*] Đang xử lý tài khoản {idx}/{len(accounts)}")
+        print(f"\n[*] Dang xu ly tai khoan {idx}/{len(accounts)}")
         
         try:
-            # Thực hiện đăng ký
+            # Thuc hien dang ky
             success = await process_registration(email, password)
             
             if success:
-                # Ghi nhận thành công
+                # Ghi nhan thanh cong
                 await save_success_account(email, password, CONFIG["SUCCESS_FILE"])
                 success_count += 1
             else:
-                print(f"[-] Đăng ký thất bại cho tài khoản: {email}")
+                print(f"[-] Dang ky that bai cho tai khoan: {email}")
                 fail_count += 1
                 
         except Exception as e:
-            print(f"[-] Lỗi crash ngoài tầm kiểm soát khi xử lý {email}: {e}")
+            print(f"[-] Loi crash ngoai tam kiem soat khi xu ly {email}: {e}")
             fail_count += 1
             
-        # Nghỉ giãn cách giữa các tài khoản
+        # Nghi gian cach giua cac tai khoan
         await asyncio.sleep(3.0)
 
     print("\n" + "=" * 60)
-    print(f"   KẾT QUẢ ĐĂNG KÝ: Tổng={len(accounts)} | Thành công={success_count} | Thất bại={fail_count}")
+    print(f"   KET QUA DANG KY: Tong={len(accounts)} | Thanh cong={success_count} | That bai={fail_count}")
     print("=" * 60)
 
 
