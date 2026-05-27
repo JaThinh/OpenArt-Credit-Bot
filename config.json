@@ -1,0 +1,18 @@
+{
+  "MAIL_API_BASE": "https://mail.cskh-group.com",
+  "MAIL_DOMAIN": "cskh-group.com",
+  "SIGNUP_URL": "https://openart.ai/signup?callbackUrl=%2Fcredit%2FYT+Affiliate",
+  "CREDIT_URL": "https://openart.ai/credit/YT%20Affiliate",
+  "PASSWORD": "ShadyPro123!@#",
+  "LOOP_COUNT": 0,
+  "CONCURRENCY": 2,
+  "DELAY_BETWEEN_ACCOUNTS": 3.0,
+  "OTP_POLL_INTERVAL": 2,
+  "OTP_MAX_ATTEMPTS": 30,
+  "HEADLESS": true,
+  "MINIMIZE_TASKBAR": false,
+  "CAPTCHA_API_KEY": "",
+  "FIREFOX_PATH": "",
+  "PROXIES": [],
+  "LOG_FILE": "success_accounts.txt"
+}
