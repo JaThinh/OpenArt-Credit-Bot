@@ -7,10 +7,11 @@ import string
 import threading
 import time
 import urllib.request
+import urllib.error
 from datetime import datetime
 from urllib.parse import unquote, urlparse
 
-# ============ CẤU HÌNH MẶC ĐỀNH ============
+# ============ CẤU HÌNH MẶC ĐỊNH ============
 CONFIG = {
     "MAIL_API_BASE": "https://mail.cskh-group.com",
     "MAIL_DOMAIN": "cskh-group.com",
@@ -158,6 +159,23 @@ def short_proxy(proxy_value, limit=24):
 
 # ============ MAIL API ============
 def create_email():
+    try:
+        username = generate_username()
+        url = f"{CONFIG['MAIL_API_BASE']}/api/new"
+        payload = json.dumps({"domain": CONFIG["MAIL_DOMAIN"], "username": username}).encode("utf-8")
+        req = urllib.request.Request(
+            url,
+            data=payload,
+            headers={"Content-Type": "application/json", "User-Agent": "Mozilla/5.0"},
+            method="POST"
+        )
+        with urllib.request.urlopen(req, timeout=10) as resp:
+            data = json.loads(resp.read().decode("utf-8"))
+        if data.get("email"):
+            return {"email": data["email"]}
+    except Exception as e:
+        log(f"Lỗi gọi API tạo mail: {e}. Sử dụng email sinh offline.", "WARN")
+    
     username = generate_username()
     return {"email": f"{username}@{CONFIG['MAIL_DOMAIN']}"}
 
@@ -171,6 +189,16 @@ def check_inbox(email_address):
     except Exception:
         return []
 
+def get_email_detail(mail_id):
+    try:
+        url = f"{CONFIG['MAIL_API_BASE']}/api/email/{mail_id}"
+        req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
+        with urllib.request.urlopen(req, timeout=10) as resp:
+            data = json.loads(resp.read())
+        return data
+    except Exception:
+        return None
+
 async def wait_for_otp(email_address, worker_id=0):
     """Poll inbox bất đồng bộ không gây block event loop."""
     for attempt in range(1, CONFIG["OTP_MAX_ATTEMPTS"] + 1):
@@ -179,12 +207,20 @@ async def wait_for_otp(email_address, worker_id=0):
         await asyncio.sleep(CONFIG["OTP_POLL_INTERVAL"])
         messages = await asyncio.to_thread(check_inbox, email_address)
         if messages:
-            content = json.dumps(messages)
-            match = re.search(r"\b\d{6}\b", content)
-            if match:
-                otp_code = match.group()
-                log(f"Đã nhận OTP: {otp_code} (Lần thử {attempt})", "SUCCESS", worker_id)
-                return otp_code
+            for msg in messages:
+                mail_id = msg.get("id")
+                if not mail_id:
+                    continue
+                # Gọi API lấy chi tiết nội dung email
+                detail = await asyncio.to_thread(get_email_detail, mail_id)
+                if detail:
+                    # Tìm OTP trong trường text hoặc html của email chi tiết
+                    content = f"{detail.get('subject', '')} {detail.get('text', '')} {detail.get('html', '')}"
+                    match = re.search(r"\b\d{6}\b", content)
+                    if match:
+                        otp_code = match.group()
+                        log(f"Đã nhận OTP: {otp_code} (Lần thử {attempt})", "SUCCESS", worker_id)
+                        return otp_code
     return None
 
 # ============ REGISTER ENGINE (Single account flow) ============
@@ -826,8 +862,91 @@ def start_gui():
     chk_minimize_var = ctk.BooleanVar(value=CONFIG["MINIMIZE_TASKBAR"])
     checkbox(row1, "[thu nhỏ taskbar]", chk_minimize_var).grid(row=0, column=9, sticky="w")
 
+    # Hàng mới row1_domain_action để thêm domain và trỏ MX record
+    row1_domain_action = ctk.CTkFrame(config_frame, fg_color=BG, corner_radius=0)
+    row1_domain_action.grid(row=1, column=0, sticky="ew", padx=10, pady=4)
+    row1_domain_action.grid_columnconfigure(1, weight=1)
+
+    label(row1_domain_action, "[domain mới]:", 11, GREEN, "bold", width=118, anchor="w").grid(row=0, column=0, sticky="w")
+    ent_new_domain = entry(row1_domain_action, placeholder="nhập domain muốn thêm (ví dụ: mydomain.com)")
+    ent_new_domain.configure(justify="left")
+    ent_new_domain.grid(row=0, column=1, sticky="ew", padx=(4, 6))
+
+    def add_domain_to_api():
+        new_dom = ent_new_domain.get().strip()
+        if not new_dom:
+            log("Vui lòng nhập tên miền muốn thêm!", "WARN")
+            return
+        
+        log(f"Đang gửi yêu cầu thêm domain: {new_dom}...", "INFO")
+        
+        def run_post():
+            try:
+                url = f"{CONFIG['MAIL_API_BASE']}/api/domains"
+                payload = json.dumps({"domain": new_dom}).encode("utf-8")
+                req = urllib.request.Request(
+                    url,
+                    data=payload,
+                    headers={"Content-Type": "application/json", "User-Agent": "Mozilla/5.0"},
+                    method="POST"
+                )
+                
+                # Gửi request
+                with urllib.request.urlopen(req, timeout=15) as resp:
+                    data = json.loads(resp.read().decode("utf-8"))
+                
+                if data.get("ok"):
+                    log(f"Thành công: Đã thêm domain {new_dom} vào hệ thống!", "SUCCESS")
+                    # Tải lại danh sách domain trên dropdown
+                    load_api_domains()
+                else:
+                    log(f"Lỗi: Không thể thêm domain.", "ERROR")
+                    
+            except urllib.error.HTTPError as he:
+                try:
+                    err_data = json.loads(he.read().decode("utf-8"))
+                    err_type = err_data.get("error")
+                    msg = err_data.get("message", "")
+                    guide = err_data.get("guide", {})
+                    
+                    if err_type == "mx_not_found":
+                        log(f"Lỗi: {msg}", "ERROR")
+                        if guide:
+                            log(f"-> Vui lòng cấu hình MX record cho domain {new_dom}:", "WARN")
+                            log(f"   + Type: {guide.get('type')}", "WARN")
+                            log(f"   + Host: {guide.get('host')}", "WARN")
+                            log(f"   + Value: {guide.get('value')}", "WARN")
+                            log(f"   + Priority: {guide.get('priority')}", "WARN")
+                            log(f"   + TTL: {guide.get('ttl')}", "WARN")
+                    else:
+                        log(f"Lỗi API: {msg}", "ERROR")
+                except Exception:
+                    log(f"Lỗi HTTP {he.code}: {he.reason}", "ERROR")
+            except Exception as e:
+                log(f"Lỗi kết nối API: {e}", "ERROR")
+
+        t = threading.Thread(target=run_post, daemon=True)
+        t.start()
+
+    # Nút bấm đăng ký thêm domain
+    ctk.CTkButton(
+        row1_domain_action,
+        text="[THÊM DOMAIN]",
+        width=110,
+        height=26,
+        fg_color=BG,
+        hover_color=GREEN_DIM,
+        border_color=GREEN,
+        border_width=1,
+        text_color=GREEN,
+        font=(MONO, 10, "bold"),
+        corner_radius=0,
+        command=add_domain_to_api,
+    ).grid(row=0, column=2, sticky="e")
+
+    # Điều chỉnh hàng row2 (đã chuyển xuống vị trí thứ 3 trong grid của config_frame)
     row2 = ctk.CTkFrame(config_frame, fg_color=BG, corner_radius=0)
-    row2.grid(row=1, column=0, sticky="ew", padx=10, pady=4)
+    row2.grid(row=2, column=0, sticky="ew", padx=10, pady=4)
     row2.grid_columnconfigure(1, weight=1)
 
     label(row2, "[2captcha]:", 11, GREEN, "bold", width=118, anchor="w").grid(row=0, column=0, sticky="w")
@@ -836,11 +955,12 @@ def start_gui():
     ent_captcha.grid(row=0, column=1, sticky="ew", padx=(4, 0))
     ent_captcha.insert(0, CONFIG.get("CAPTCHA_API_KEY", ""))
 
+    # Điều chỉnh hàng row3 (đã chuyển xuống vị trí thứ 4 trong grid của config_frame)
     row3 = ctk.CTkFrame(config_frame, fg_color=BG, corner_radius=0)
-    row3.grid(row=2, column=0, sticky="ew", padx=10, pady=4)
+    row3.grid(row=3, column=0, sticky="ew", padx=10, pady=4)
     label(row3, "[proxy list]:", 11, GREEN, "bold", width=118, anchor="w").pack(side="left")
     
-    # Hàm xử lý tải proxy từ Github dạng raw
+    # Hàm xử lý tải proxy từ GitHub dạng raw
     def download_github_proxies():
         log("Đang kết nối GitHub để tải danh sách proxy...", "WARN")
         try:
@@ -900,14 +1020,14 @@ def start_gui():
         scrollbar_button_color=GREEN_DIM,
         scrollbar_button_hover_color=GREEN,
     )
-    txt_proxy.grid(row=3, column=0, sticky="ew", padx=10, pady=(0, 4))
+    txt_proxy.grid(row=4, column=0, sticky="ew", padx=10, pady=(0, 4))
     
     # Nạp proxy từ CONFIG đã tải
     if CONFIG.get("PROXIES"):
         txt_proxy.insert(tk.END, "\n".join(CONFIG["PROXIES"]))
 
     row4 = ctk.CTkFrame(config_frame, fg_color=BG, corner_radius=0)
-    row4.grid(row=4, column=0, sticky="ew", padx=10, pady=(4, 10))
+    row4.grid(row=5, column=0, sticky="ew", padx=10, pady=(4, 10))
     row4.grid_columnconfigure(1, weight=1)
 
     label(row4, "[firefox path]:", 11, GREEN, "bold", width=118, anchor="w").grid(row=0, column=0, sticky="w")
@@ -1214,12 +1334,23 @@ def start_gui():
     def load_api_domains():
         log("Đang tải danh sách domain từ API mail...", "INFO")
         try:
-            url = f"{CONFIG['MAIL_API_BASE']}/api/domains"
-            req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
+            url = f"{CONFIG['MAIL_API_BASE']}/v1/domains"
+            headers = {
+                "User-Agent": "Mozilla/5.0",
+                "X-API-Key": CONFIG.get("TEMP_MAIL_API_KEY", "")
+            }
+            req = urllib.request.Request(url, headers=headers, method="GET")
             with urllib.request.urlopen(req, timeout=10) as resp:
                 data = json.loads(resp.read())
             
-            domains = data.get("domains", [])
+            # API temp-mail.io v1 trả về list trực tiếp, ví dụ: ["domain1.com", "domain2.com"]
+            if isinstance(data, list):
+                domains = data
+            elif isinstance(data, dict):
+                domains = data.get("domains", [])
+            else:
+                domains = []
+
             if domains:
                 global AVAILABLE_DOMAINS
                 AVAILABLE_DOMAINS.clear()
