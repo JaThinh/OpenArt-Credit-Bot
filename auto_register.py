@@ -3,7 +3,7 @@ import re
 import os
 import httpx
 from playwright.async_api import async_playwright
-from playwright_stealth import stealth_async
+from playwright_stealth import Stealth
 
 # ============ CẤU HÌNH HỆ THỐNG & SELECTORS ============
 # Vui lòng kiểm tra lại F12 trên OpenArt thực tế để điều chỉnh các Selector nếu cần.
@@ -138,6 +138,9 @@ async def process_registration(email: str, password: str) -> bool:
     print(f"[*] Bắt đầu xử lý đăng ký tài khoản: {email}")
     print(f"==================================================")
 
+    # Khởi tạo Stealth
+    stealth = Stealth()
+
     async with async_playwright() as p:
         # Khởi chạy Chromium (headless=False để dễ giám sát)
         browser = await p.chromium.launch(headless=False)
@@ -150,7 +153,7 @@ async def process_registration(email: str, password: str) -> bool:
         
         page = await context.new_page()
         # Áp dụng Stealth để che dấu Playwright
-        await stealth_async(page)
+        await stealth.apply_stealth_async(page)
 
         try:
             # 1. Đi tới trang Login/Signup
@@ -202,7 +205,7 @@ async def process_registration(email: str, password: str) -> bool:
                 print("[*] Tiến hành xác thực bằng Link kích hoạt...")
                 # Mở tab mới chạy link kích hoạt
                 activation_page = await context.new_page()
-                await stealth_async(activation_page)
+                await stealth.apply_stealth_async(activation_page)
                 await activation_page.goto(activation_data["link"], wait_until="domcontentloaded", timeout=40000)
                 await asyncio.sleep(5.0)
                 print("[+] Xác thực qua Link hoàn tất.")
