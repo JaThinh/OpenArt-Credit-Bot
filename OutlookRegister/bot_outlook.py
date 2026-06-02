@@ -48,8 +48,10 @@ ui_log_lines = []
 MAX_UI_LOG_LINES = 1000
 # Sử dụng URL đăng ký trực tiếp để tránh chuyển hướng OAuth2 và mở form Email chuẩn
 OUTLOOK_SIGNUP_URL = "https://signup.live.com/signup?lic=1"
-OUTLOOK_NAVIGATION_TIMEOUT_MS = 45000
-OUTLOOK_READY_TIMEOUT_MS = 45000
+OUTLOOK_NAVIGATION_TIMEOUT_MS = 20000
+OUTLOOK_READY_TIMEOUT_MS = 15000
+OUTLOOK_ACTION_TIMEOUT_MS = 10000
+BROWSER_LAUNCH_TIMEOUT_MS = 15000
 # ========================================================
 # CẬP NHẬT SELECTOR ĐA TẦNG (BẮT TRỌN TRANG OAUTH2 LIVE)
 # ========================================================
@@ -81,7 +83,8 @@ CONFIG = {
     "concurrent_flows": 1,
     "max_tasks": 1000,
     "headless": False,
-    "timeout_secs": 45,
+    "timeout_secs": 20,
+    "launch_timeout_ms": 15000,
     "proxies": [],
     "oauth2": {
         "enable_oauth2": False,
@@ -95,6 +98,17 @@ CONFIG = {
 }
 
 CONFIG_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "config.json")
+
+def apply_runtime_timeouts():
+    global OUTLOOK_NAVIGATION_TIMEOUT_MS, OUTLOOK_READY_TIMEOUT_MS, OUTLOOK_ACTION_TIMEOUT_MS, BROWSER_LAUNCH_TIMEOUT_MS
+    timeout_ms = max(5000, int(CONFIG.get("timeout_secs", 20)) * 1000)
+    OUTLOOK_NAVIGATION_TIMEOUT_MS = min(timeout_ms, 20000)
+    OUTLOOK_READY_TIMEOUT_MS = min(timeout_ms, 15000)
+    OUTLOOK_ACTION_TIMEOUT_MS = min(timeout_ms, 10000)
+    BROWSER_LAUNCH_TIMEOUT_MS = min(
+        max(5000, int(CONFIG.get("launch_timeout_ms", 15000))),
+        15000,
+    )
 
 def find_firefox_path():
     try:
@@ -163,9 +177,7 @@ def load_config():
                 json.dump(CONFIG, f, indent=4, ensure_ascii=False)
         except Exception:
             pass
-    global OUTLOOK_NAVIGATION_TIMEOUT_MS, OUTLOOK_READY_TIMEOUT_MS
-    OUTLOOK_NAVIGATION_TIMEOUT_MS = int(CONFIG.get("timeout_secs", 45)) * 1000
-    OUTLOOK_READY_TIMEOUT_MS = OUTLOOK_NAVIGATION_TIMEOUT_MS
+    apply_runtime_timeouts()
 
 def save_config():
     try:
@@ -189,7 +201,7 @@ if signup_url:
 def log(msg, msg_type="INFO", worker_id=0):
     timestamp = datetime.now().strftime("%H:%M:%S")
     # Chỉ lọc giữ lại các log hệ thống quan trọng hoặc kết quả terminal cho UI
-    if msg_type not in ["SUCCESS", "ERROR", "WARN"]:
+    if msg_type not in ["SUCCESS", "ERROR", "WARN", "STEP"]:
         # Bỏ qua log phụ trên UI nhưng vẫn ghi vào danh sách nếu cần thiết,
         # Tuy nhiên yêu cầu là ẩn chúng đi, do đó ta trả về luôn để log gọn gàng.
         # Nhưng đợi đã, nếu ta return luôn thì nó không in ra terminal.
@@ -197,7 +209,7 @@ def log(msg, msg_type="INFO", worker_id=0):
         # "Bỏ qua hoàn toàn các log bước phụ"
         return
 
-    prefix = {"SUCCESS": "[+]", "ERROR": "[-]", "WARN": "[!]"}
+    prefix = {"SUCCESS": "[+]", "ERROR": "[-]", "WARN": "[!]", "STEP": "[>]"}
     prefix_str = prefix.get(msg_type, "[*]")
     tag = f"W{worker_id:02d}" if worker_id > 0 else "BOT"
     console_line = f"[{timestamp}] {prefix_str} [{tag}] {msg}"
@@ -329,13 +341,14 @@ def load_outlook_signup_page(page, worker_id, assigned_proxy):
     try:
         page.goto(
             OUTLOOK_SIGNUP_URL,
-            timeout=35000,
+            timeout=OUTLOOK_NAVIGATION_TIMEOUT_MS,
             wait_until="commit"
         )
     except Exception as nav_err:
         stop_page_loading(page)
         proxy_hint = f" qua proxy {short_proxy(assigned_proxy)}" if assigned_proxy else " truc tiep"
-        raise TimeoutError(f"Outlook khong phan hoi sau 35s{proxy_hint}: {nav_err}") from nav_err
+        timeout_seconds = OUTLOOK_NAVIGATION_TIMEOUT_MS // 1000
+        raise TimeoutError(f"Outlook khong phan hoi sau {timeout_seconds}s{proxy_hint}: {nav_err}") from nav_err
 
     try:
         wait_for_outlook_ready(page)
@@ -374,23 +387,28 @@ class PlaywrightWorkerController:
             launch_args = build_browser_launch_args(self.proxy)
             launch_options = {
                 "headless": CONFIG.get("headless", False),
+                "timeout": BROWSER_LAUNCH_TIMEOUT_MS,
+                "args": [
+                    "--no-sandbox",
+                    "--disable-dev-shm-usage",
+                    "--disable-blink-features=AutomationControlled",
+                    "--disable-gpu",
+                    "--disable-webrtc",
+                ],
             }
             # Chỉ gán executable_path nếu có đường dẫn hợp lệ
-            if self.browser_path and os.path.exists(self.browser_path):
+            browser_path_lower = (self.browser_path or "").lower()
+            is_chromium_path = any(name in browser_path_lower for name in ("chrome", "chromium", "msedge"))
+            if self.browser_path and os.path.exists(self.browser_path) and is_chromium_path:
                 launch_options["executable_path"] = self.browser_path
             launch_options.update(launch_args)
 
             # Chọn engine trình duyệt theo config choose_browser
-            chosen = CONFIG.get("choose_browser", "chromium").lower().strip()
-            browser_path_lower = (self.browser_path or "").lower()
+            CONFIG["choose_browser"] = "chromium"
+            chosen = "chromium"
 
             if chosen in ("chromium", "chrome", "playwright") or "chrome" in browser_path_lower or "google" in browser_path_lower:
                 # Chromium: hỗ trợ đầy đủ is_mobile, has_touch, device_scale_factor
-                launch_options.setdefault("args", [])
-                launch_options["args"].extend([
-                    "--disable-blink-features=AutomationControlled",
-                    "--disable-webrtc",
-                ])
                 b = p.chromium.launch(**launch_options)
                 self.browser_type = "chromium"
                 log("Đã khởi chạy nhân Chromium (hỗ trợ Mobile Emulation).", "INFO")
@@ -480,7 +498,7 @@ class PlaywrightWorkerController:
 
         try:
             ws(1, "Vao trang chu dang ky...")
-            max_attempts = 2
+            max_attempts = 1 if self.proxy else 2
             for attempt in range(1, max_attempts + 1):
                 try:
                     log(f"Dang tai trang chu dang ky (Lan thu {attempt}/{max_attempts})...", "INFO", worker_id)
@@ -516,7 +534,7 @@ class PlaywrightWorkerController:
             # giao diện mobile so với desktop. Cập nhật các selector tương ứng nếu cần.
             ws(2, "Dien email muon tao...")
             try:
-                page.wait_for_selector(EMAIL_INPUT_SELECTOR, state="visible", timeout=20000)
+                page.wait_for_selector(EMAIL_INPUT_SELECTOR, state="visible", timeout=OUTLOOK_READY_TIMEOUT_MS)
                 print("[+] Da tim thay o nhap lieu Email thanh cong.")
             except Exception as selector_err:
                 print(f"[-] Khong tim thay o nhap Email do timeout hoac doi giao dien: {selector_err}")
@@ -809,6 +827,7 @@ def register_one_outlook(worker_id, account_index, assigned_proxy):
     refresh_token = ""
     controller = PlaywrightWorkerController(assigned_proxy)
     try:
+        ws(1, "Khoi tao Chromium...")
         browser = controller.get_browser()
         browser_engine = getattr(controller, "browser_type", "chromium")
         browser_profile = get_browser_profile(browser_engine)
@@ -853,8 +872,11 @@ def register_one_outlook(worker_id, account_index, assigned_proxy):
 
         context = browser.new_context(**context_options)
         context.set_default_navigation_timeout(OUTLOOK_NAVIGATION_TIMEOUT_MS)
-        context.set_default_timeout(10000)
+        context.set_default_timeout(OUTLOOK_ACTION_TIMEOUT_MS)
+        ws(1, "Tao context va mo tab...")
         page = context.new_page()
+        page.set_default_navigation_timeout(OUTLOOK_NAVIGATION_TIMEOUT_MS)
+        page.set_default_timeout(OUTLOOK_ACTION_TIMEOUT_MS)
 
         # Tăng tốc độ load trang Outlook bằng cách chặn các tài nguyên nặng và tracking quảng cáo
         def block_useless_resources(route):
@@ -1470,7 +1492,7 @@ def start_gui():
     label(row3, "Timeout (s):", 11, TEXT, "bold").grid(row=0, column=3, sticky="w", padx=(15, 4))
     ent_timeout = entry(row3, 40)
     ent_timeout.grid(row=0, column=4, sticky="w")
-    ent_timeout.insert(0, str(CONFIG.get("timeout_secs", 45)))
+    ent_timeout.insert(0, str(CONFIG.get("timeout_secs", 20)))
 
     # ---- Action Buttons ----
     actions = ctk.CTkFrame(main, fg_color=BG, corner_radius=0)
@@ -1487,10 +1509,8 @@ def start_gui():
         CONFIG["choose_browser"] = opt_browser.get()
         CONFIG["max_captcha_retries"] = parse_int(ent_captcha_retries.get(), CONFIG.get("max_captcha_retries", 3), 0)
         CONFIG["proxy"] = ent_single_proxy.get().strip()
-        CONFIG["timeout_secs"] = parse_int(ent_timeout.get(), CONFIG.get("timeout_secs", 45), 5)
-        global OUTLOOK_NAVIGATION_TIMEOUT_MS, OUTLOOK_READY_TIMEOUT_MS
-        OUTLOOK_NAVIGATION_TIMEOUT_MS = CONFIG["timeout_secs"] * 1000
-        OUTLOOK_READY_TIMEOUT_MS = OUTLOOK_NAVIGATION_TIMEOUT_MS
+        CONFIG["timeout_secs"] = parse_int(ent_timeout.get(), CONFIG.get("timeout_secs", 20), 5)
+        apply_runtime_timeouts()
 
         if "playwright" not in CONFIG:
             CONFIG["playwright"] = {}
