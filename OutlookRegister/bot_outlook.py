@@ -8,6 +8,7 @@ import string
 import sys
 import threading
 import time
+import unicodedata
 from datetime import datetime
 from utils import random_email, generate_strong_password, get_random_user_agent
 from get_token import get_access_token
@@ -101,7 +102,8 @@ CONFIG = {
 CAPTCHA_INITIAL_WAIT_MS = 6000
 CAPTCHA_HOLD_MIN_MS = 5200
 CAPTCHA_HOLD_MAX_MS = 6800
-CAPTCHA_POST_HOLD_WAIT_MS = 700
+CAPTCHA_POST_HOLD_WAIT_MS = 1200
+CAPTCHA_RESULT_WAIT_MS = 14000
 
 CONFIG_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "config.json")
 
@@ -415,8 +417,14 @@ def get_page_body_text(page, timeout=1500):
     except Exception:
         return ""
 
+def normalize_visible_text(value):
+    text = str(value or "").lower()
+    text = unicodedata.normalize("NFD", text)
+    text = "".join(ch for ch in text if unicodedata.category(ch) != "Mn")
+    return text.replace("đ", "d")
+
 def is_proxy_auth_error_text(text):
-    text = str(text or "").lower()
+    text = normalize_visible_text(text)
     return (
         "not authenticated" in text
         or "invalid authentication credentials" in text
@@ -557,7 +565,7 @@ class PlaywrightWorkerController:
         dropdown.click(force=True, timeout=3000)
         page.wait_for_timeout(120)
 
-        normalized_names = [str(name).strip().lower() for name in option_names if str(name).strip()]
+        normalized_names = [normalize_visible_text(name).strip() for name in option_names if str(name).strip()]
         options = page.locator('[role="option"]')
         try:
             option_count = min(options.count(), 80)
@@ -569,7 +577,7 @@ class PlaywrightWorkerController:
             try:
                 if not option.is_visible(timeout=200):
                     continue
-                text = option.inner_text(timeout=250).strip().lower()
+                text = normalize_visible_text(option.inner_text(timeout=250)).strip()
                 if text in normalized_names or any(name and name in text for name in normalized_names):
                     option.click(force=True, timeout=1000)
                     return True
@@ -623,18 +631,61 @@ class PlaywrightWorkerController:
 
     def handle_captcha(self, page, worker_id, ws):
         def captcha_retry_text_visible():
-            body_text = get_page_body_text(page, timeout=1000).lower()
-            return "try again" in body_text or "vui" in body_text
+            body_text = normalize_visible_text(get_page_body_text(page, timeout=1000))
+            return (
+                "try again" in body_text
+                or "try another" in body_text
+                or "vui long thu lai" in body_text
+                or "thu lai" in body_text
+            )
+
+        def enforcement_frame_visible():
+            selectors = (
+                'iframe#enforcementFrame',
+                'iframe[src*="enforcement"]',
+                'iframe[src*="arkose"]',
+                'iframe[src*="funcaptcha"]',
+                'iframe[src*="captcha"]',
+                'iframe[src*="crcldu"]',
+            )
+            for selector in selectors:
+                try:
+                    locator = page.locator(selector)
+                    for idx in range(min(locator.count(), 3)):
+                        if locator.nth(idx).is_visible(timeout=200):
+                            return True
+                except Exception:
+                    continue
+            return False
 
         def captcha_challenge_visible():
-            body_text = get_page_body_text(page, timeout=1000).lower()
+            body_text = normalize_visible_text(get_page_body_text(page, timeout=1000))
             return (
                 "chứng minh" in body_text
                 or "nhấn và giữ" in body_text
                 or "nhan va giu" in body_text
+                or "chung minh" in body_text
                 or "prove" in body_text and "human" in body_text
                 or "press and hold" in body_text
+                or "verify" in body_text and "human" in body_text
+                or enforcement_frame_visible()
             )
+
+        def scope_is_captcha(scope):
+            if scope is page:
+                return captcha_challenge_visible()
+            try:
+                frame_url = str(scope.url or "").lower()
+            except Exception:
+                frame_url = ""
+            return any(token in frame_url for token in (
+                "captcha",
+                "enforcement",
+                "arkose",
+                "funcaptcha",
+                "hsprotect",
+                "crcldu",
+            ))
 
         def wait_for_captcha_result(timeout_ms):
             deadline = time.time() + timeout_ms / 1000
@@ -648,22 +699,23 @@ class PlaywrightWorkerController:
 
         def find_hold_button(timeout_ms):
             deadline = time.time() + timeout_ms / 1000
+            no_challenge_deadline = time.time() + 1.6
             selectors = [
                 'button:has-text("Hold")',
                 '[role="button"]:has-text("Hold")',
                 'button:has-text("Press")',
                 '[role="button"]:has-text("Press")',
-                'button:has-text("Nh")',
-                '[role="button"]:has-text("Nh")',
                 'button',
                 '[role="button"]',
             ]
 
             while time.time() < deadline and not should_stop:
+                challenge_visible = captcha_challenge_visible()
                 scopes = [page] + list(page.frames)
                 fallback = None
                 fallback_area = 0
                 for scope in scopes:
+                    allow_fallback = scope_is_captcha(scope)
                     for selector in selectors:
                         try:
                             locator = scope.locator(selector)
@@ -676,20 +728,22 @@ class PlaywrightWorkerController:
                                     continue
                                 text = ""
                                 try:
-                                    text = candidate.inner_text(timeout=250).strip().lower()
+                                    text = normalize_visible_text(candidate.inner_text(timeout=250)).strip()
                                 except Exception:
                                     pass
-                                if "hold" in text or "press" in text or "nh" in text:
+                                if "hold" in text or "press" in text or "nhan" in text or "giu" in text:
                                     return candidate
                                 area = box["width"] * box["height"]
-                                if area > fallback_area:
+                                if allow_fallback and area > fallback_area:
                                     fallback = candidate
                                     fallback_area = area
                         except Exception:
                             continue
                 if fallback is not None:
                     return fallback
-                page.wait_for_timeout(400)
+                if not challenge_visible and time.time() >= no_challenge_deadline:
+                    return None
+                page.wait_for_timeout(300)
             return None
 
         def press_and_hold(locator, duration_ms):
@@ -710,9 +764,12 @@ class PlaywrightWorkerController:
         ws(6, "Tim nut captcha nhan-giu...")
         hold_button = find_hold_button(CAPTCHA_INITIAL_WAIT_MS)
         if hold_button is None:
+            if captcha_challenge_visible():
+                log("Captcha dang hien nhung khong tim thay nut nhan-giu.", "WARN", worker_id)
+                return False
             return True
 
-        max_attempts = max(1, min(int(self.max_captcha_retries or 1), 2))
+        max_attempts = max(1, min(int(self.max_captcha_retries or 1), 3))
         for attempt in range(1, max_attempts + 1):
             if should_stop:
                 return False
@@ -727,7 +784,7 @@ class PlaywrightWorkerController:
                 log("IP bi gioi han tan suat (Rate Limit).", "ERROR", worker_id)
                 return False
 
-            captcha_result = wait_for_captcha_result(9000)
+            captcha_result = wait_for_captcha_result(CAPTCHA_RESULT_WAIT_MS)
             if captcha_result == "passed":
                 return True
             if captcha_result == "pending":
@@ -834,7 +891,7 @@ class PlaywrightWorkerController:
 
             # 1. Chọn Month qua combobox
             # Ánh xạ tên tháng tiếng Anh
-            for lb in page.locator('[role="listbox"]').all():
+            for lb in []:
                 if lb.is_visible():
                     try:
                         # Thử tìm theo tháng tiếng Anh hoặc số tháng tùy locale
@@ -856,7 +913,7 @@ class PlaywrightWorkerController:
             # 2. Chọn Day qua combobox
             day_selected = True
             page.wait_for_timeout(1)
-            for lb in page.locator('[role="listbox"]').all():
+            for lb in []:
                 if lb.is_visible():
                     try:
                         opt = lb.locator(f'[role="option"]:text-is("{day}")').first
