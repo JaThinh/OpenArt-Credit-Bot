@@ -142,6 +142,15 @@ def normalize_signup_url(value):
         pass
     return DEFAULT_OUTLOOK_SIGNUP_URL
 
+def build_full_email(local_part, suffix):
+    local_part = str(local_part or "").strip()
+    suffix = str(suffix or "").strip() or "@hotmail.com"
+    if "@" in local_part:
+        return local_part
+    if not suffix.startswith("@"):
+        suffix = f"@{suffix}"
+    return f"{local_part}{suffix}"
+
 def find_firefox_path():
     try:
         import winreg
@@ -638,18 +647,12 @@ class PlaywrightWorkerController:
                 except Exception as screenshot_err:
                     print(f"[-] Khong chup duoc screenshot debug: {screenshot_err}")
                 raise
-            if self.email_suffix == "@hotmail.com":
-                try:
-                    page.get_by_text("@outlook.com").click(timeout=5000)
-                    page.locator(f'[role="option"]:text-is("@hotmail.com")').click()
-                except:
-                    pass
-
             email_input = page.locator(EMAIL_INPUT_SELECTOR).first
+            full_email = build_full_email(email, self.email_suffix)
 
             # Mô phỏng người dùng nhập email chậm rãi
             page.wait_for_timeout(random.randint(800, 2000))
-            email_input.fill(email)
+            email_input.fill(full_email)
             page.wait_for_timeout(random.randint(1500, 3000)) # Trì hoãn trước khi click Next
             page.locator(NEXT_BUTTON_SELECTOR).click()
             page.wait_for_timeout(random.randint(2000, 4000)) # Trì hoãn chờ trang load tiếp
@@ -897,7 +900,7 @@ def get_browser_profile(browser_engine="chromium"):
 def register_one_outlook(worker_id, account_index, assigned_proxy):
     email = random_email()
     password = generate_strong_password()
-    full_email = f"{email}{CONFIG['email_suffix']}"
+    full_email = build_full_email(email, CONFIG.get('email_suffix', '@hotmail.com'))
 
     start_time = time.time()
     w = workers[worker_id - 1]
