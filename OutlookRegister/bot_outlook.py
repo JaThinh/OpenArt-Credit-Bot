@@ -136,7 +136,6 @@ def find_firefox_path():
     return ""
 
 def load_config():
-    global CONFIG
     if os.path.exists(CONFIG_PATH):
         try:
             with open(CONFIG_PATH, "r", encoding="utf-8") as f:
@@ -162,7 +161,6 @@ def load_config():
     OUTLOOK_READY_TIMEOUT_MS = OUTLOOK_NAVIGATION_TIMEOUT_MS
 
 def save_config():
-    global CONFIG, OUTLOOK_SIGNUP_URL
     try:
         with open(CONFIG_PATH, "w", encoding="utf-8") as f:
             json.dump(CONFIG, f, indent=4, ensure_ascii=False)
@@ -777,7 +775,6 @@ def get_browser_profile(browser_engine="chromium"):
     return random.choice(firefox_profiles if browser_engine == "firefox" else chromium_profiles)
 
 def register_one_outlook(worker_id, account_index, assigned_proxy):
-    global stats
     email = random_email()
     password = generate_strong_password()
     full_email = f"{email}{CONFIG['email_suffix']}"
@@ -1063,7 +1060,7 @@ def worker_loop(worker_id, q, total_accounts):
     log(f"Worker {worker_id:02d} dung hoat dong.", "INFO", worker_id)
 
 def run_pool(concurrency, total_accounts):
-    global should_stop, is_paused, bot_state
+    global bot_state
     q = queue.Queue()
 
     log(f"Khoi tao luong dang ky: Concurrency={concurrency} | Total={total_accounts}", "INFO")
@@ -1084,7 +1081,7 @@ def run_pool(concurrency, total_accounts):
     log(f"HOAN THANH: Tong {stats['total']} | Success {stats['success']} | Fail {stats['fail']}", "SUCCESS")
 
 def start_bot_thread(concurrency, total_accounts):
-    global bot_state, should_stop, is_paused, workers
+    global bot_state, should_stop, is_paused
     should_stop = False
     is_paused = False
     bot_state = "RUNNING"

@@ -1,4 +1,5 @@
 # Tệp log tài khoản
+config.json
 success_accounts.txt
 accounts.txt
 accounts_*.txt

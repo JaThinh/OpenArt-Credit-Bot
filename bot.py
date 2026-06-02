@@ -36,11 +36,11 @@ except ImportError:
 
 # ============ CẤU HÌNH MẶC ĐỊNH ============
 CONFIG = {
-    "MAIL_API_BASE": "https://mail.cskh-group.com",
-    "MAIL_DOMAIN": "cskh-group.com",
-    "SIGNUP_URL": "https://signup.live.com/signup?lic=1",
-    "CREDIT_URL": "https://openart.ai/credit/YT%20Affiliate",
-    "PASSWORD": "ShadyPro123!@#",
+    "MAIL_API_BASE": "",
+    "MAIL_DOMAIN": "",
+    "SIGNUP_URL": "",
+    "CREDIT_URL": "",
+    "PASSWORD": "",
     "LOOP_COUNT": 0,
     "CONCURRENCY": 2,
     "DELAY_BETWEEN_ACCOUNTS": 3.0,
@@ -108,7 +108,6 @@ def find_firefox_path():
     return ""
 
 def load_config():
-    global CONFIG
     if os.path.exists(CONFIG_PATH):
         try:
             with open(CONFIG_PATH, "r", encoding="utf-8") as f:
@@ -221,6 +220,21 @@ async def save_account(email, password, status):
 
 def generate_username():
     return "shady" + "".join(random.choices(string.ascii_lowercase + string.digits, k=6))
+
+def get_modern_user_agent():
+    useragent_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "useragent.txt")
+    try:
+        with open(useragent_path, "r", encoding="utf-8", errors="ignore") as f:
+            candidates = [line.strip() for line in f if line.strip()]
+        modern_candidates = [
+            ua for ua in candidates
+            if "Windows NT 5." not in ua and "Windows NT 6.0" not in ua and "MSIE" not in ua
+        ]
+        if modern_candidates:
+            return random.choice(modern_candidates)
+    except Exception:
+        pass
+    return "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36"
 
 def is_proxy_alive(proxy_str, timeout=2.5):
     import urllib.request
@@ -905,7 +919,6 @@ async def safe_navigate_to_signup(page, worker_id):
 
 # ============ REGISTER ENGINE (Single account flow) ============
 async def register_one(worker_id, account_index, assigned_proxy, custom_email=None, custom_password=None, worker_profile_dir=None):
-    global stats
     from camoufox.async_api import AsyncCamoufox
 
     # Sử dụng tài khoản tùy chỉnh từ file nếu có, nếu không thì tự sinh
@@ -1307,7 +1320,7 @@ def read_local_accounts():
 
 
 async def run_pool(concurrency, total_accounts):
-    global should_stop, is_paused, bot_state
+    global bot_state
 
     # Khởi động hàng đợi
     queue = asyncio.Queue()
@@ -1366,7 +1379,7 @@ async def run_pool(concurrency, total_accounts):
 
 
 def start_bot_thread(concurrency, total_accounts):
-    global bot_state, should_stop, is_paused, workers
+    global bot_state, should_stop, is_paused
     should_stop = False
     is_paused = False
     bot_state = "RUNNING"
@@ -1928,7 +1941,6 @@ def start_gui():
             log("Sử dụng danh sách domain mặc định làm fallback.", "WARN")
             domains = normalize_domain_names([CONFIG.get("MAIL_DOMAIN"), "temp-mail.io", "cskh-group.com"])
 
-        global AVAILABLE_DOMAINS
         AVAILABLE_DOMAINS.clear()
         AVAILABLE_DOMAINS.extend(domains)
 

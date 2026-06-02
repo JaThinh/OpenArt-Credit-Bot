@@ -22,10 +22,11 @@ OpenArt-Credit-Bot/
 ├── bot.py                         # GUI và engine chính cho OpenArt
 ├── start-bot.py                   # Launcher GUI chọn OpenArt hoặc Outlook
 ├── start-bot.bat                  # Script Windows tạo venv, cài dependencies và mở menu chạy bot
-├── config.json                    # Cấu hình OpenArt, mail API, proxy, browser, log
+├── config.example.json            # Cấu hình mẫu sạch cho OpenArt
 ├── accounts.txt                   # File local bị ignore, dùng cho account input tùy chọn
 ├── success_accounts.txt           # File output account OpenArt thành công
 ├── requirements.txt               # Dependencies Python chính
+├── requirements-optional.txt      # Dependencies tùy chọn
 ├── health_check.py                # Kiểm tra môi trường offline
 ├── vpn_manager.py                 # Điều khiển ExpressVPN CLI tùy chọn
 ├── useragent.txt                  # Danh sách User-Agent
@@ -58,7 +59,7 @@ requests
 temp-mail
 ```
 
-Nếu `OutlookRegister/config.json` đặt `choose_browser` là `patchright`, cần cài thêm package `patchright`. Nếu không cài, một số luồng CLI có fallback về Playwright, nhưng GUI/flow Patchright có thể không chạy như mong muốn. File `OutlookRegister/config.json` là cấu hình local bị ignore; dùng `OutlookRegister/config.example.json` làm mẫu khi cần tạo mới.
+Nếu `OutlookRegister/config.json` đặt `choose_browser` là `patchright`, cần cài thêm package `patchright` bằng `python -m pip install -r requirements-optional.txt` hoặc `python -m pip install patchright`. Nếu không cài, một số luồng CLI có fallback về Playwright, nhưng GUI/flow Patchright có thể không chạy như mong muốn. File `OutlookRegister/config.json` là cấu hình local bị ignore; dùng `OutlookRegister/config.example.json` làm mẫu khi cần tạo mới.
 
 ## Cài đặt nhanh
 
@@ -83,9 +84,13 @@ python -m venv .venv
 .\.venv\Scripts\Activate.ps1
 python -m pip install --upgrade pip
 python -m pip install -r requirements.txt
+copy config.example.json config.json
+copy OutlookRegister\config.example.json OutlookRegister\config.json
 python -m playwright install firefox chromium
 python -m camoufox fetch
 ```
+
+Không commit hai file cấu hình local `config.json` và `OutlookRegister/config.json` sau khi tạo.
 
 Chạy launcher chung:
 
@@ -114,7 +119,7 @@ python main.py
 
 ## Cấu hình OpenArt
 
-File cấu hình chính nằm ở `config.json` tại thư mục gốc.
+File cấu hình chính nằm ở `config.json` tại thư mục gốc. File này là cấu hình local bị ignore; repo có `config.example.json` làm mẫu sạch. Sau khi clone, tạo file local bằng `copy config.example.json config.json` rồi điền URL, domain, password, proxy hoặc token của môi trường riêng.
 
 | Khóa | Ý nghĩa |
 | --- | --- |
@@ -209,8 +214,8 @@ Script sẽ kiểm tra:
 
 - Các file Python có compile được không.
 - Package bắt buộc có import được không.
-- `config.json` và `OutlookRegister/config.json` có đủ key chính không.
-- Module chính có import được không.
+- `config.json`/`config.example.json` và `OutlookRegister/config.json`/`OutlookRegister/config.example.json` có đủ key chính không.
+- Các module helper ít side effect có import được không; module GUI chính chỉ được kiểm tra bằng compile.
 - Tình trạng package tùy chọn `patchright`.
 
 ## VPN manager
@@ -227,7 +232,7 @@ Module này đọc thêm các key kiểu `change_ip_mode` hoặc `num_fail_to_ch
 
 - `config.json`, `accounts.txt`, `success_accounts.txt`, `OutlookRegister/config.json`, `OutlookRegister/thanhcong.txt` và thư mục `OutlookRegister/Results/` có thể chứa dữ liệu nhạy cảm.
 - Không đưa API key, proxy trả phí, email/password hoặc refresh token lên git/public repo.
-- `.gitignore` bỏ qua account/output/cache runtime và cấu hình Outlook local. Không stage proxy/key/account thật khi cập nhật repo.
+- `.gitignore` bỏ qua account/output/cache runtime và cấu hình local. Không stage proxy/key/account thật khi cập nhật repo.
 - Nên dùng file config mẫu riêng nếu muốn chia sẻ project cho người khác.
 
 ## Xử lý lỗi thường gặp

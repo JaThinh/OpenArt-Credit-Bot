@@ -1,0 +1,22 @@
+{
+  "MAIL_API_BASE": "",
+  "MAIL_DOMAIN": "",
+  "SIGNUP_URL": "",
+  "CREDIT_URL": "",
+  "PASSWORD": "",
+  "LOOP_COUNT": 1,
+  "CONCURRENCY": 1,
+  "DELAY_BETWEEN_ACCOUNTS": 3.0,
+  "OTP_POLL_INTERVAL": 5,
+  "OTP_MAX_ATTEMPTS": 12,
+  "HEADLESS": true,
+  "MINIMIZE_TASKBAR": false,
+  "CAPTCHA_API_KEY": "",
+  "FIREFOX_PATH": "",
+  "PROXIES": [],
+  "LOG_FILE": "success_accounts.txt",
+  "TEMP_MAIL_API_KEY": "",
+  "MAILVIP_API_TOKEN": "",
+  "change_ip_mode": "proxy",
+  "num_fail_to_change_ip": 2
+}

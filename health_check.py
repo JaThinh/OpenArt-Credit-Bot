@@ -70,6 +70,12 @@ def load_json(path: pathlib.Path) -> dict:
         raise TypeError(f"{path.name} must contain a JSON object")
     return data
 
+def config_path_with_fallback(primary: pathlib.Path, fallback: pathlib.Path) -> pathlib.Path:
+    if primary.exists():
+        return primary
+    warn(f"{primary.relative_to(ROOT)} not found; using {fallback.relative_to(ROOT)}")
+    return fallback
+
 
 def check_compile() -> bool:
     ignored = {".git", ".venv", "venv", "env", "__pycache__"}
@@ -98,22 +104,27 @@ def check_packages() -> bool:
 
 def check_configs() -> tuple[bool, dict, dict]:
     success = True
-    root_config = load_json(ROOT / "config.json")
-    outlook_config = load_json(OUTLOOK_DIR / "config.json")
+    root_config_path = config_path_with_fallback(ROOT / "config.json", ROOT / "config.example.json")
+    outlook_config_path = config_path_with_fallback(
+        OUTLOOK_DIR / "config.json",
+        OUTLOOK_DIR / "config.example.json",
+    )
+    root_config = load_json(root_config_path)
+    outlook_config = load_json(outlook_config_path)
 
     missing_root = sorted(ROOT_CONFIG_KEYS - set(root_config))
     missing_outlook = sorted(OUTLOOK_CONFIG_KEYS - set(outlook_config))
     if missing_root:
-        fail(f"config.json missing keys: {', '.join(missing_root)}")
+        fail(f"{root_config_path.relative_to(ROOT)} missing keys: {', '.join(missing_root)}")
         success = False
     else:
-        ok("config.json keys look complete")
+        ok(f"{root_config_path.relative_to(ROOT)} keys look complete")
 
     if missing_outlook:
-        fail(f"OutlookRegister/config.json missing keys: {', '.join(missing_outlook)}")
+        fail(f"{outlook_config_path.relative_to(ROOT)} missing keys: {', '.join(missing_outlook)}")
         success = False
     else:
-        ok("OutlookRegister/config.json keys look complete")
+        ok(f"{outlook_config_path.relative_to(ROOT)} keys look complete")
 
     proxies = root_config.get("PROXIES", [])
     if proxies and not isinstance(proxies, list):
@@ -135,13 +146,11 @@ def check_project_imports() -> bool:
     sys.path.insert(0, str(OUTLOOK_DIR))
 
     for module_name in (
-        "bot",
         "vpn_manager",
         "network_service",
         "playwright_input_utils",
         "playwright_fault_tolerance",
         "playwright_session_manager",
-        "bot_outlook",
     ):
         try:
             importlib.import_module(module_name)
@@ -163,7 +172,7 @@ def check_optional(outlook_config: dict) -> bool:
         return True
 
     if not importlib.util.find_spec("patchright"):
-        warn("patchright is not installed; this is fine while choose_browser=playwright")
+        warn(f"patchright is not installed; this is fine while choose_browser={browser}")
     return True
 
 

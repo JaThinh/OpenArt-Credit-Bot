@@ -1,0 +1,9 @@
+[flake8]
+extend-exclude =
+    .git,
+    .venv,
+    venv,
+    env,
+    __pycache__,
+    OutlookRegister/%SystemDrive%,
+    OutlookRegister/Results
