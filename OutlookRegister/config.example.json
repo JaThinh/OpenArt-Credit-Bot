@@ -1,0 +1,26 @@
+{
+  "choose_browser": "chromium",
+  "email_suffix": "@hotmail.com",
+  "proxy": "",
+  "use_parent_proxies": false,
+  "bot_protection_wait": 5.0,
+  "max_captcha_retries": 3,
+  "concurrent_flows": 1,
+  "max_tasks": 1000,
+  "headless": false,
+  "timeout_secs": 45,
+  "proxies": [],
+  "oauth2": {
+    "enable_oauth2": false,
+    "client_id": "",
+    "redirect_url": "",
+    "Scopes": [
+      "offline_access",
+      "https://graph.microsoft.com/Mail.ReadWrite"
+    ]
+  },
+  "playwright": {
+    "browser_path": ""
+  },
+  "SIGNUP_URL": "https://signup.live.com/signup?lic=1"
+}

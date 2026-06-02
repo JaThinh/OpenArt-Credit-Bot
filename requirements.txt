@@ -1,0 +1,7 @@
+customtkinter
+camoufox
+Faker
+httpx
+playwright
+requests
+temp-mail

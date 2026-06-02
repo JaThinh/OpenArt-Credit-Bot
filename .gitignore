@@ -1,7 +1,15 @@
 # Tệp log tài khoản
 success_accounts.txt
+accounts.txt
 accounts_*.txt
 *.log
+OutlookRegister/Results/
+OutlookRegister/thanhcong.txt
+OutlookRegister/outlook_success.txt
+OutlookRegister/config.json
+OutlookRegister/%SystemDrive%/
+*.db
+reg_success.txt
 
 # Môi trường ảo Python
 venv/
