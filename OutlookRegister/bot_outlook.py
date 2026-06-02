@@ -98,10 +98,10 @@ CONFIG = {
     }
 }
 
-CAPTCHA_INITIAL_WAIT_MS = 8000
-CAPTCHA_HOLD_MIN_MS = 6500
-CAPTCHA_HOLD_MAX_MS = 8500
-CAPTCHA_POST_HOLD_WAIT_MS = 1800
+CAPTCHA_INITIAL_WAIT_MS = 6000
+CAPTCHA_HOLD_MIN_MS = 5200
+CAPTCHA_HOLD_MAX_MS = 6800
+CAPTCHA_POST_HOLD_WAIT_MS = 700
 
 CONFIG_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "config.json")
 
@@ -551,10 +551,100 @@ class PlaywrightWorkerController:
                 self.thread_local.playwright.stop()
             except Exception: pass
 
+    def select_birth_dropdown(self, page, dropdown_selector, option_names, fallback_index):
+        dropdown = page.locator(dropdown_selector).first
+        dropdown.wait_for(state="visible", timeout=8000)
+        dropdown.click(force=True, timeout=3000)
+        page.wait_for_timeout(120)
+
+        normalized_names = [str(name).strip().lower() for name in option_names if str(name).strip()]
+        options = page.locator('[role="option"]')
+        try:
+            option_count = min(options.count(), 80)
+        except Exception:
+            option_count = 0
+
+        for idx in range(option_count):
+            option = options.nth(idx)
+            try:
+                if not option.is_visible(timeout=200):
+                    continue
+                text = option.inner_text(timeout=250).strip().lower()
+                if text in normalized_names or any(name and name in text for name in normalized_names):
+                    option.click(force=True, timeout=1000)
+                    return True
+            except Exception:
+                continue
+
+        try:
+            dropdown.press("Home")
+            for _ in range(max(0, int(fallback_index) - 1)):
+                dropdown.press("ArrowDown")
+            dropdown.press("Enter")
+            return True
+        except Exception:
+            return False
+
+    def fill_birth_details_fast(self, page, day, month, year):
+        day_value = int(day)
+        month_value = int(month)
+        vietnamese_months = [
+            "Tháng Một", "Tháng Hai", "Tháng Ba", "Tháng Tư", "Tháng Năm", "Tháng Sáu",
+            "Tháng Bảy", "Tháng Tám", "Tháng Chín", "Tháng Mười", "Tháng Mười Một", "Tháng Mười Hai",
+        ]
+        english_months = [
+            "January", "February", "March", "April", "May", "June",
+            "July", "August", "September", "October", "November", "December",
+        ]
+
+        self.select_birth_dropdown(
+            page,
+            '#BirthDayDropdown, [name="BirthDay"], [aria-label*="Day"], [aria-label*="Ngày"]',
+            [str(day_value), f"Ngày {day_value}", f"Day {day_value}"],
+            day_value,
+        )
+        self.select_birth_dropdown(
+            page,
+            '#BirthMonthDropdown, [name="BirthMonth"], [aria-label*="Month"], [aria-label*="Tháng"]',
+            [
+                vietnamese_months[month_value - 1],
+                english_months[month_value - 1],
+                str(month_value),
+                f"Tháng {month_value}",
+            ],
+            month_value,
+        )
+
+        year_input = page.locator(
+            'input[name="BirthYear"], input[id="BirthYear"], input[aria-label*="Year"], input[aria-label*="Năm"]'
+        ).first
+        year_input.wait_for(state="visible", timeout=8000)
+        year_input.fill(str(year))
+
     def handle_captcha(self, page, worker_id, ws):
         def captcha_retry_text_visible():
             body_text = get_page_body_text(page, timeout=1000).lower()
             return "try again" in body_text or "vui" in body_text
+
+        def captcha_challenge_visible():
+            body_text = get_page_body_text(page, timeout=1000).lower()
+            return (
+                "chứng minh" in body_text
+                or "nhấn và giữ" in body_text
+                or "nhan va giu" in body_text
+                or "prove" in body_text and "human" in body_text
+                or "press and hold" in body_text
+            )
+
+        def wait_for_captcha_result(timeout_ms):
+            deadline = time.time() + timeout_ms / 1000
+            while time.time() < deadline and not should_stop:
+                if captcha_retry_text_visible():
+                    return "retry"
+                if not captcha_challenge_visible():
+                    return "passed"
+                page.wait_for_timeout(400)
+            return "pending"
 
         def find_hold_button(timeout_ms):
             deadline = time.time() + timeout_ms / 1000
@@ -637,8 +727,11 @@ class PlaywrightWorkerController:
                 log("IP bi gioi han tan suat (Rate Limit).", "ERROR", worker_id)
                 return False
 
-            if not captcha_retry_text_visible():
+            captcha_result = wait_for_captcha_result(9000)
+            if captcha_result == "passed":
                 return True
+            if captcha_result == "pending":
+                log("Captcha da hien dau tick nhung chua chuyen trang, thu lai nhanh.", "WARN", worker_id)
 
             hold_button = find_hold_button(2500)
             if hold_button is None:
@@ -734,17 +827,13 @@ class PlaywrightWorkerController:
 
             # === BƯỚC 3: NGÀY THÁNG NĂM SINH (ADD DETAILS) ===
             ws(4, "Dien ngay thang nam sinh...")
-            page.wait_for_selector('input[name="BirthYear"]', timeout=15000)
+            self.fill_birth_details_fast(page, day, month, year)
+            page.keyboard.press("Escape")
+            month_selected = True
+            month_name = str(month)
 
             # 1. Chọn Month qua combobox
-            page.wait_for_timeout(random.randint(500, 1200))
-            page.locator('#BirthMonthDropdown').first.click(force=True)
-            page.wait_for_timeout(800)
-            month_selected = False
             # Ánh xạ tên tháng tiếng Anh
-            english_months = ["January", "February", "March", "April", "May", "June", "July", "August", "September", "October", "November", "December"]
-            month_name = english_months[int(month) - 1]
-
             for lb in page.locator('[role="listbox"]').all():
                 if lb.is_visible():
                     try:
@@ -762,12 +851,11 @@ class PlaywrightWorkerController:
                 page.locator('#BirthMonthDropdown').first.press("ArrowDown")
                 page.locator('#BirthMonthDropdown').first.press("Enter")
 
-            page.wait_for_timeout(random.randint(600, 1500))
+            page.wait_for_timeout(1)
 
             # 2. Chọn Day qua combobox
-            page.locator('#BirthDayDropdown').first.click(force=True)
-            page.wait_for_timeout(800)
-            day_selected = False
+            day_selected = True
+            page.wait_for_timeout(1)
             for lb in page.locator('[role="listbox"]').all():
                 if lb.is_visible():
                     try:
@@ -781,11 +869,10 @@ class PlaywrightWorkerController:
                 page.locator('#BirthDayDropdown').first.press("ArrowDown")
                 page.locator('#BirthDayDropdown').first.press("Enter")
 
-            page.wait_for_timeout(random.randint(600, 1500))
+            page.wait_for_timeout(1)
 
             # 3. Nhập Year sau cùng
-            page.locator('input[name="BirthYear"]').fill("")
-            page.locator('input[name="BirthYear"]').type(year, delay=random.randint(80, 150))
+            page.locator('input[name="BirthYear"]').fill(year)
             page.wait_for_timeout(random.randint(500, 1000)) # Trì hoãn trước khi click Next
 
             # Click Next
