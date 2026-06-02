@@ -218,6 +218,26 @@ Script sẽ kiểm tra:
 - Các module helper ít side effect có import được không; module GUI chính chỉ được kiểm tra bằng compile.
 - Tình trạng package tùy chọn `patchright`.
 
+## Kiểm tra tự động
+
+Repo có GitHub Actions tại `.github/workflows/health-check.yml`. Mỗi lần push hoặc mở pull request, workflow sẽ cài dependency, chạy flake8 nhóm lỗi nghiêm trọng, compile các file chính và chạy `python health_check.py`.
+
+Để chặn commit nhầm secret trên máy local:
+
+```powershell
+python -m pip install pre-commit detect-secrets
+python -m pre_commit install
+```
+
+Baseline secret hiện tại nằm ở `.secrets.baseline`. Khi thêm file mới, chạy lại:
+
+```powershell
+python -m detect_secrets scan > .secrets.baseline
+python -m pre_commit run --all-files
+```
+
+Nếu muốn dùng biến môi trường thay vì điền trực tiếp vào JSON local, copy `.env.example` thành `.env` rồi điền giá trị riêng. File `.env` bị ignore và không được commit.
+
 ## VPN manager
 
 `vpn_manager.py` điều khiển ExpressVPN qua executable mặc định:
@@ -234,6 +254,7 @@ Module này đọc thêm các key kiểu `change_ip_mode` hoặc `num_fail_to_ch
 - Không đưa API key, proxy trả phí, email/password hoặc refresh token lên git/public repo.
 - `.gitignore` bỏ qua account/output/cache runtime và cấu hình local. Không stage proxy/key/account thật khi cập nhật repo.
 - Nên dùng file config mẫu riêng nếu muốn chia sẻ project cho người khác.
+- Nếu secret từng nằm trong git history, hãy coi như đã lộ và rotate password/token/API/proxy liên quan. Xóa khỏi HEAD không xóa được lịch sử đã public.
 
 ## Xử lý lỗi thường gặp
 
