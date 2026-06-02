@@ -110,6 +110,16 @@ def apply_runtime_timeouts():
         15000,
     )
 
+def normalize_chromium_browser_path(browser_path):
+    browser_path = str(browser_path or "").strip()
+    if not browser_path or not os.path.exists(browser_path):
+        return ""
+
+    executable_name = os.path.basename(browser_path).lower()
+    if any(name in executable_name for name in ("chrome", "chromium", "msedge")):
+        return os.path.abspath(browser_path)
+    return ""
+
 def find_firefox_path():
     try:
         import winreg
@@ -165,18 +175,13 @@ def load_config():
         except Exception as e:
             print(f"Loi doc config.json: {e}")
 
-    # Tự động dò tìm đường dẫn Firefox nếu trống hoặc không hợp lệ
-    if "playwright" not in CONFIG:
+    if "playwright" not in CONFIG or not isinstance(CONFIG.get("playwright"), dict):
         CONFIG["playwright"] = {"browser_path": ""}
-    if not CONFIG["playwright"].get("browser_path") or not os.path.exists(CONFIG["playwright"]["browser_path"]) or "WindowsApps" in CONFIG["playwright"]["browser_path"] or "windowsapps" in CONFIG["playwright"]["browser_path"]:
-        auto_path = find_firefox_path()
-        # Gán auto_path (có thể trống "") để dùng mặc định
-        CONFIG["playwright"]["browser_path"] = auto_path
-        try:
-            with open(CONFIG_PATH, "w", encoding="utf-8") as f:
-                json.dump(CONFIG, f, indent=4, ensure_ascii=False)
-        except Exception:
-            pass
+
+    CONFIG["choose_browser"] = "chromium"
+    CONFIG["playwright"]["browser_path"] = normalize_chromium_browser_path(
+        CONFIG["playwright"].get("browser_path", "")
+    )
     apply_runtime_timeouts()
 
 def save_config():
@@ -188,11 +193,8 @@ def save_config():
 
 load_config()
 
-# Force Chromium-style execution unless user explicitly uses Firefox.
-if str(CONFIG.get("choose_browser", "")).strip().lower() in ("chrome", "playwright"):
-    CONFIG["choose_browser"] = "chromium"
-if str(CONFIG.get("choose_browser", "")).strip().lower() not in ("chromium", "firefox"):
-    CONFIG["choose_browser"] = "chromium"
+# Outlook flow is Chromium-only to avoid Firefox profile-lock popups.
+CONFIG["choose_browser"] = "chromium"
 
 signup_url = str(CONFIG.get("SIGNUP_URL", "")).strip()
 if signup_url:
@@ -412,7 +414,7 @@ class PlaywrightWorkerController:
                 b = p.chromium.launch(**launch_options)
                 self.browser_type = "chromium"
                 log("Đã khởi chạy nhân Chromium (hỗ trợ Mobile Emulation).", "INFO")
-            elif chosen == "firefox" or "firefox" in browser_path_lower:
+            elif False:
                 b = p.firefox.launch(**launch_options)
                 self.browser_type = "firefox"
                 log("Đã khởi chạy nhân Firefox (Desktop Responsive). Mobile flags sẽ bị bỏ qua.", "INFO")
@@ -1449,10 +1451,10 @@ def start_gui():
     opt_browser = ctk.CTkOptionMenu(
         row2, height=28, fg_color=PANEL_ALT, button_color=PRIMARY,
         button_hover_color=PRIMARY_HOVER, text_color=TEXT,
-        font=(MONO, 11), corner_radius=6, values=["playwright", "patchright"]
+        font=(MONO, 11), corner_radius=6, values=["chromium"]
     )
     opt_browser.grid(row=0, column=3, padx=(4, 15), sticky="ew")
-    opt_browser.set(CONFIG.get("choose_browser", "patchright"))
+    opt_browser.set("chromium")
 
     label(row2, "Thử captcha:", 11, TEXT, "bold").grid(row=0, column=4, sticky="w")
     ent_captcha_retries = entry(row2, 50)
@@ -1464,20 +1466,20 @@ def start_gui():
     ent_single_proxy.grid(row=0, column=7, padx=(4, 0), sticky="ew")
     ent_single_proxy.insert(0, str(CONFIG.get("proxy", "")))
 
-    # Row 3: Firefox executable path
+    # Row 3: optional Chromium executable path
     row3 = ctk.CTkFrame(config_frame, fg_color=BG, corner_radius=0)
     row3.grid(row=2, column=0, sticky="ew", padx=10, pady=(4, 8))
     row3.grid_columnconfigure(1, weight=1)
 
-    label(row3, "Playwright Firefox path:", 11, TEXT, "bold").grid(row=0, column=0, sticky="w")
-    ent_firefox = entry(row3, placeholder="Để trống để tự động nhận dạng trình duyệt an toàn")
+    label(row3, "Chromium path:", 11, TEXT, "bold").grid(row=0, column=0, sticky="w")
+    ent_firefox = entry(row3, placeholder="Để trống để dùng Chromium mặc định của Playwright")
     ent_firefox.grid(row=0, column=1, sticky="ew", padx=(8, 8))
     ent_firefox.insert(0, CONFIG.get("playwright", {}).get("browser_path", ""))
 
     def choose_firefox_path():
         path = filedialog.askopenfilename(
-            title="Chọn Firefox executable",
-            filetypes=[("Firefox executable", "*.exe"), ("All files", "*.*")]
+            title="Chọn Chrome/Chromium executable",
+            filetypes=[("Browser executable", "*.exe"), ("All files", "*.*")]
         )
         if path:
             ent_firefox.delete(0, tk.END)
@@ -1506,7 +1508,7 @@ def start_gui():
         CONFIG["bot_protection_wait"] = parse_float(ent_delay.get(), CONFIG.get("bot_protection_wait", 5.0), 0)
         CONFIG["headless"] = bool(chk_headless_var.get())
         CONFIG["use_parent_proxies"] = bool(chk_parent_proxies_var.get())
-        CONFIG["choose_browser"] = opt_browser.get()
+        CONFIG["choose_browser"] = "chromium"
         CONFIG["max_captcha_retries"] = parse_int(ent_captcha_retries.get(), CONFIG.get("max_captcha_retries", 3), 0)
         CONFIG["proxy"] = ent_single_proxy.get().strip()
         CONFIG["timeout_secs"] = parse_int(ent_timeout.get(), CONFIG.get("timeout_secs", 20), 5)
@@ -1514,7 +1516,7 @@ def start_gui():
 
         if "playwright" not in CONFIG:
             CONFIG["playwright"] = {}
-        CONFIG["playwright"]["browser_path"] = ent_firefox.get().strip()
+        CONFIG["playwright"]["browser_path"] = normalize_chromium_browser_path(ent_firefox.get().strip())
         save_config()
 
     def action_run():
