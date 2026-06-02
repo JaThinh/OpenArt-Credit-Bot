@@ -6,6 +6,7 @@ import shutil
 import tempfile
 from contextlib import asynccontextmanager, suppress
 from dataclasses import dataclass
+from functools import partial
 from typing import Any, AsyncIterator, Awaitable, Callable, Optional
 
 from playwright.async_api import (
@@ -44,6 +45,16 @@ class BrowserSessionResult:
 
 
 SessionHandler = Callable[[WorkerSandboxSession, AutomationTask, dict[str, Any], int], Awaitable[Any]]
+SyncFunction = Callable[..., Any]
+
+async def execute_sync_module_safe(sync_function: SyncFunction, *args: Any, **kwargs: Any) -> Any:
+    """Run a synchronous helper in a worker thread without blocking the event loop.
+
+    Use this only for sync helpers that own their sync Playwright objects or do
+    non-Playwright blocking work. Do not pass an async Playwright Page/Context
+    into a sync helper; convert that helper to async instead.
+    """
+    return await asyncio.to_thread(partial(sync_function, *args, **kwargs))
 
 
 def _browser_launcher(playwright: Any, browser_type: str) -> Any:
@@ -75,7 +86,7 @@ async def isolated_worker_session(
     context_options: Optional[dict[str, Any]] = None,
     launch_options: Optional[dict[str, Any]] = None,
     persistent_context: bool = True,
-    navigation_timeout_ms: int = 45_000,
+    navigation_timeout_ms: int = 20_000,
     action_timeout_ms: int = 15_000,
 ) -> AsyncIterator[WorkerSandboxSession]:
     """Create an isolated async Playwright session and always clean it up."""
@@ -146,7 +157,13 @@ async def run_browser_session(
 ) -> BrowserSessionResult:
     """Run one browser session with total timeout, per-action timeouts, and cleanup."""
     current_step = "infrastructure_init"
-    total_timeout_sec = float(configs.get("total_timeout_sec", 45))
+    total_timeout_sec = float(configs.get("total_timeout_sec", 40))
+    required_browser_args = [
+        "--no-sandbox",
+        "--disable-dev-shm-usage",
+        "--disable-blink-features=AutomationControlled",
+        "--disable-gpu",
+    ]
 
     try:
         async with asyncio.timeout(total_timeout_sec):
@@ -157,7 +174,12 @@ async def run_browser_session(
             launch_options = dict(configs.get("launch_options") or {})
             persistent_context = bool(configs.get("persistent_context", True))
             browser_args = list(configs.get("browser_args") or [])
-            launch_timeout_ms = int(configs.get("launch_timeout_ms", 15_000))
+            for arg in required_browser_args:
+                if arg not in browser_args:
+                    browser_args.append(arg)
+            launch_timeout_ms = 15_000
+            navigation_timeout_ms = int(configs.get("navigation_timeout_ms", 20_000))
+            action_timeout_ms = int(configs.get("action_timeout_ms", 15_000))
 
             if browser_args:
                 if persistent_context:
@@ -179,13 +201,13 @@ async def run_browser_session(
             current_step = "browser_session"
             async with isolated_worker_session(
                 playwright,
-                browser_type=str(configs.get("browser_type", "chromium")),
-                headless=bool(configs.get("headless", True)),
+                browser_type="chromium",
+                headless=True,
                 context_options=context_options,
                 launch_options=launch_options,
                 persistent_context=persistent_context,
-                navigation_timeout_ms=int(configs.get("navigation_timeout_ms", 25_000)),
-                action_timeout_ms=int(configs.get("action_timeout_ms", 15_000)),
+                navigation_timeout_ms=navigation_timeout_ms,
+                action_timeout_ms=action_timeout_ms,
             ) as session:
                 if session_handler is not None:
                     current_step = "session_handler"
@@ -197,6 +219,7 @@ async def run_browser_session(
                 await session.page.goto(
                     task.target_url,
                     wait_until=str(configs.get("wait_until", "commit")),
+                    timeout=navigation_timeout_ms,
                 )
 
                 current_step = "execution"

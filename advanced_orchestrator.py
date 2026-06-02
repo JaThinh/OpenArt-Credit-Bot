@@ -34,15 +34,16 @@ class CoreBrowserOrchestrator:
         "persistent_context": True,
         "launch_timeout_ms": 15_000,
         "action_timeout_ms": 15_000,
-        "navigation_timeout_ms": 25_000,
-        "selector_timeout_ms": 20_000,
-        "total_timeout_sec": 50,
+        "navigation_timeout_ms": 20_000,
+        "selector_timeout_ms": 15_000,
+        "total_timeout_sec": 40,
         "failure_circuit_threshold": 5,
         "sandbox_base_dir": "./sandboxes",
-        "wait_until": "domcontentloaded",
+        "wait_until": "commit",
         "browser_args": [
             "--disable-blink-features=AutomationControlled",
             "--disable-dev-shm-usage",
+            "--disable-gpu",
             "--disable-sync",
             "--disable-webrtc",
             "--no-sandbox",
@@ -147,7 +148,12 @@ class CoreBrowserOrchestrator:
         worker_id: int,
     ) -> str:
         page = session.page
-        await page.goto(task.target_url, wait_until=str(configs.get("wait_until", "domcontentloaded")))
+        navigation_timeout_ms = int(configs.get("navigation_timeout_ms", 20_000))
+        await page.goto(
+            task.target_url,
+            wait_until=str(configs.get("wait_until", "commit")),
+            timeout=navigation_timeout_ms,
+        )
 
         record_data = task.record_data or {}
         email_to_input = str(record_data.get("email") or "").strip()
@@ -158,7 +164,7 @@ class CoreBrowserOrchestrator:
             await page.wait_for_selector(
                 combined_query,
                 state="visible",
-                timeout=int(configs.get("selector_timeout_ms", 20_000)),
+                timeout=int(configs.get("selector_timeout_ms", 15_000)),
             )
             await page.focus(combined_query)
             for char in email_to_input:
@@ -312,8 +318,8 @@ async def main() -> None:
         "headless": True,
         "launch_timeout_ms": 15_000,
         "action_timeout_ms": 15_000,
-        "navigation_timeout_ms": 25_000,
-        "total_timeout_sec": 50,
+        "navigation_timeout_ms": 20_000,
+        "total_timeout_sec": 40,
     }
     tasks = [
         AutomationTask(index=1, target_url="https://example.com"),
