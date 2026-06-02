@@ -7,3 +7,4 @@ extend-exclude =
     __pycache__,
     OutlookRegister/%SystemDrive%,
     OutlookRegister/Results
+max-line-length = 88
