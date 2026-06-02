@@ -1,4 +1,5 @@
 import queue
+import concurrent.futures
 import json
 import os
 import random
@@ -33,6 +34,12 @@ bot_state = "OFFLINE"
 stats = {"total": 0, "success": 0, "fail": 0}
 workers = []
 BAD_PROXY_BLACKLIST = set()
+LIVE_PROXY_CACHE = {}
+LIVE_PROXY_CACHE_TTL_SECONDS = 90.0
+PROXY_PROBE_BATCH_SIZE = 16
+PROXY_PROBE_WORKERS = 8
+PROXY_PROBE_TIMEOUT_SECONDS = 1.2
+proxy_cache_lock = threading.Lock()
 should_stop = False
 is_paused = False
 lock = threading.Lock()
@@ -981,6 +988,40 @@ def register_one_outlook(worker_id, account_index, assigned_proxy):
 
     return success
 
+def run_registration_isolated(worker_id, account_index, assigned_proxy):
+    """Run the full sync Playwright registration flow on a clean thread.
+
+    The Outlook flow still uses Playwright's sync API. Running the complete
+    sync lifecycle in its own thread avoids the "Sync API inside asyncio loop"
+    failure when the caller is hosted by an async-aware runtime.
+    """
+    result_queue = queue.Queue(maxsize=1)
+
+    def target():
+        try:
+            try:
+                import asyncio
+                asyncio.set_event_loop(None)
+            except Exception:
+                pass
+            result_queue.put(register_one_outlook(worker_id, account_index, assigned_proxy))
+        except Exception as exc:
+            result_queue.put(exc)
+
+    worker = threading.Thread(
+        target=target,
+        name=f"outlook-sync-playwright-w{worker_id:02d}",
+        daemon=True,
+    )
+    worker.start()
+    worker.join()
+
+    result = result_queue.get() if not result_queue.empty() else False
+    if isinstance(result, Exception):
+        log(f"Loi thread Playwright co lap: {result}", "ERROR", worker_id)
+        return False
+    return bool(result)
+
 def is_proxy_alive(proxy_str, timeout=2.5):
     import urllib.request
     from urllib.parse import quote, urlsplit, urlunsplit
@@ -1011,6 +1052,80 @@ def is_proxy_alive(proxy_str, timeout=2.5):
         pass
     return False
 
+def remember_live_proxy(proxy_value):
+    key = proxy_key(proxy_value)
+    if not key:
+        return
+    with proxy_cache_lock:
+        LIVE_PROXY_CACHE[key] = (proxy_value, time.monotonic() + LIVE_PROXY_CACHE_TTL_SECONDS)
+
+def forget_live_proxy(proxy_value):
+    key = proxy_key(proxy_value)
+    if not key:
+        return
+    with proxy_cache_lock:
+        LIVE_PROXY_CACHE.pop(key, None)
+
+def get_cached_live_proxy():
+    now = time.monotonic()
+    with proxy_cache_lock:
+        expired = [key for key, (_proxy, expires_at) in LIVE_PROXY_CACHE.items() if expires_at <= now]
+        for key in expired:
+            LIVE_PROXY_CACHE.pop(key, None)
+
+        live_candidates = [
+            proxy
+            for key, (proxy, _expires_at) in LIVE_PROXY_CACHE.items()
+            if key not in BAD_PROXY_BLACKLIST
+        ]
+    return random.choice(live_candidates) if live_candidates else ""
+
+def select_fast_proxy(proxies, worker_id):
+    if not proxies:
+        return ""
+
+    cached_proxy = get_cached_live_proxy()
+    if cached_proxy:
+        log(f"Dung proxy song trong cache: {short_proxy(cached_proxy)}", "INFO", worker_id)
+        return cached_proxy
+
+    candidates = [proxy for proxy in proxies if proxy_key(proxy) not in BAD_PROXY_BLACKLIST]
+    if not candidates:
+        candidates = list(proxies)
+    random.shuffle(candidates)
+    candidates = candidates[:min(PROXY_PROBE_BATCH_SIZE, len(candidates))]
+
+    if not candidates:
+        return ""
+
+    probe_workers = min(PROXY_PROBE_WORKERS, len(candidates))
+    log(f"Dang do nhanh {len(candidates)} proxy song song...", "INFO", worker_id)
+
+    with concurrent.futures.ThreadPoolExecutor(max_workers=probe_workers) as executor:
+        future_to_proxy = {
+            executor.submit(is_proxy_alive, candidate, PROXY_PROBE_TIMEOUT_SECONDS): candidate
+            for candidate in candidates
+        }
+        try:
+            for future in concurrent.futures.as_completed(
+                future_to_proxy,
+                timeout=PROXY_PROBE_TIMEOUT_SECONDS + 0.8,
+            ):
+                candidate = future_to_proxy[future]
+                try:
+                    if future.result():
+                        remember_live_proxy(candidate)
+                        log(f"Da tim thay proxy hoat dong tot: {short_proxy(candidate)}", "SUCCESS", worker_id)
+                        return candidate
+                except Exception:
+                    continue
+        except concurrent.futures.TimeoutError:
+            pass
+
+    fallback = random.choice(candidates)
+    log(f"Khong co proxy nao phan hoi nhanh, dung proxy ngau nhien: {short_proxy(fallback)}", "WARN", worker_id)
+    return fallback
+
 # ============ WORKER POOL LOOP ============
 def worker_loop(worker_id, q, total_accounts):
     log(f"Worker {worker_id:02d} khoi dong.", "INFO", worker_id)
@@ -1033,21 +1148,12 @@ def worker_loop(worker_id, q, total_accounts):
         # Phan bo proxy
         assigned_proxy = ""
         if proxies:
-            log("Dang do tim proxy phan hoi nhanh tu danh sach...", "INFO", worker_id)
-            for _ in range(12):
-                candidate = random.choice(proxies)
-                if proxy_key(candidate) in BAD_PROXY_BLACKLIST:
-                    continue
-                if is_proxy_alive(candidate):
-                    assigned_proxy = candidate
-                    log(f"Da tim thay proxy hoat dong tot: {short_proxy(candidate)}", "SUCCESS", worker_id)
-                    break
-            else:
-                assigned_proxy = random.choice(proxies)
-                log(f"Khong co proxy nao phan hoi nhanh, dung proxy ngau nhien: {short_proxy(assigned_proxy)}", "WARN", worker_id)
+            assigned_proxy = select_fast_proxy(proxies, worker_id)
 
         log(f"Bat dau dang ky account thu #{account_idx}...", "INFO", worker_id)
-        register_one_outlook(worker_id, account_idx, assigned_proxy)
+        success = run_registration_isolated(worker_id, account_idx, assigned_proxy)
+        if assigned_proxy and not success:
+            forget_live_proxy(assigned_proxy)
         q.task_done()
 
         if CONFIG["bot_protection_wait"] > 0 and not should_stop:
@@ -1215,6 +1321,21 @@ def start_gui():
     app.geometry("850x780")
     app.minsize(700, 650)
     app.configure(fg_color=BG)
+    closing_state = {"closing": False}
+
+    def on_close():
+        global should_stop, bot_state
+        if closing_state["closing"]:
+            return
+        closing_state["closing"] = True
+        should_stop = True
+        bot_state = "OFFLINE"
+        try:
+            app.destroy()
+        except Exception:
+            pass
+
+    app.protocol("WM_DELETE_WINDOW", on_close)
 
     main_scroll = ctk.CTkScrollableFrame(app, fg_color=BG, border_width=0, corner_radius=0)
     main_scroll.pack(fill="both", expand=True, padx=5, pady=5)
@@ -1530,6 +1651,9 @@ def start_gui():
 
     # Cập nhật GUI mỗi 500ms
     def update_gui():
+        if closing_state["closing"]:
+            return
+
         stat_labels["total"].configure(text=f"{stats['total']:03d}")
         stat_labels["success"].configure(text=f"{stats['success']:03d}")
         stat_labels["fail"].configure(text=f"{stats['fail']:03d}")
@@ -1570,15 +1694,19 @@ def start_gui():
         for item in new_logs:
             append_log_line(item["line"] if isinstance(item, dict) else str(item))
 
-        app.after(500, update_gui)
+        if not closing_state["closing"]:
+            app.after(500, update_gui)
 
     title_colors = [PRIMARY, "#60a5fa", "#93c5fd", "#bfdbfe", "#93c5fd", "#60a5fa"]
     title_color_idx = [0]
     def animate_title():
         try:
+            if closing_state["closing"]:
+                return
             lbl_main_title.configure(text_color=title_colors[title_color_idx[0]])
             title_color_idx[0] = (title_color_idx[0] + 1) % len(title_colors)
-            app.after(350, animate_title)
+            if not closing_state["closing"]:
+                app.after(350, animate_title)
         except Exception: pass
 
     status_pulse_colors = {
@@ -1589,17 +1717,23 @@ def start_gui():
     status_pulse_idx = [0]
     def animate_status():
         try:
+            if closing_state["closing"]:
+                return
             pulse_list = status_pulse_colors.get(bot_state, [ERROR])
             color = pulse_list[status_pulse_idx[0] % len(pulse_list)]
             lbl_system_status.configure(text_color=color)
             status_pulse_idx[0] += 1
-            app.after(300, animate_status)
+            if not closing_state["closing"]:
+                app.after(300, animate_status)
         except Exception: pass
 
     animate_title()
     animate_status()
     update_gui()
-    app.mainloop()
+    try:
+        app.mainloop()
+    except KeyboardInterrupt:
+        on_close()
 
 if __name__ == "__main__":
     print("=" * 50)
