@@ -47,7 +47,8 @@ SESSION_LOG_FILE = f"outlook_{datetime.now().strftime('%Y%m%d_%H%M%S')}.txt"
 ui_log_lines = []
 MAX_UI_LOG_LINES = 1000
 # Sử dụng URL đăng ký trực tiếp để tránh chuyển hướng OAuth2 và mở form Email chuẩn
-OUTLOOK_SIGNUP_URL = "https://signup.live.com/signup?lic=1"
+DEFAULT_OUTLOOK_SIGNUP_URL = "https://signup.live.com/signup?lic=1"
+OUTLOOK_SIGNUP_URL = DEFAULT_OUTLOOK_SIGNUP_URL
 OUTLOOK_NAVIGATION_TIMEOUT_MS = 20000
 OUTLOOK_READY_TIMEOUT_MS = 15000
 OUTLOOK_ACTION_TIMEOUT_MS = 10000
@@ -119,6 +120,27 @@ def normalize_chromium_browser_path(browser_path):
     if any(name in executable_name for name in ("chrome", "chromium", "msedge")):
         return os.path.abspath(browser_path)
     return ""
+
+def normalize_signup_url(value):
+    from urllib.parse import urlsplit
+
+    url = str(value or "").strip()
+    if not url:
+        return DEFAULT_OUTLOOK_SIGNUP_URL
+
+    try:
+        parsed = urlsplit(url)
+        host = (parsed.hostname or "").lower()
+        if parsed.scheme in ("http", "https") and (
+            host == "live.com"
+            or host.endswith(".live.com")
+            or host == "microsoft.com"
+            or host.endswith(".microsoft.com")
+        ):
+            return url
+    except Exception:
+        pass
+    return DEFAULT_OUTLOOK_SIGNUP_URL
 
 def find_firefox_path():
     try:
@@ -196,9 +218,7 @@ load_config()
 # Outlook flow is Chromium-only to avoid Firefox profile-lock popups.
 CONFIG["choose_browser"] = "chromium"
 
-signup_url = str(CONFIG.get("SIGNUP_URL", "")).strip()
-if signup_url:
-    OUTLOOK_SIGNUP_URL = signup_url
+OUTLOOK_SIGNUP_URL = normalize_signup_url(CONFIG.get("SIGNUP_URL", ""))
 
 def log(msg, msg_type="INFO", worker_id=0):
     timestamp = datetime.now().strftime("%H:%M:%S")
@@ -263,18 +283,42 @@ def get_parent_proxy():
 
 # ============ PARSE PROXY FOR PLAYWRIGHT ============
 def parse_proxy_object(proxy_value):
+    from urllib.parse import unquote, urlsplit, urlunsplit
+
     if not proxy_value:
         return None
 
+    def with_scheme(server):
+        server = str(server or "").strip()
+        if not server:
+            return ""
+        return server if "://" in server else f"http://{server}"
+
+    def split_auth_url(raw_url):
+        parsed = urlsplit(with_scheme(raw_url))
+        if not parsed.hostname:
+            return None
+
+        host = parsed.hostname
+        if ":" in host and not host.startswith("["):
+            host = f"[{host}]"
+        netloc = f"{host}:{parsed.port}" if parsed.port else host
+        proxy_config = {"server": urlunsplit((parsed.scheme or "http", netloc, "", "", ""))}
+        if parsed.username:
+            proxy_config["username"] = unquote(parsed.username)
+        if parsed.password:
+            proxy_config["password"] = unquote(parsed.password)
+        return proxy_config
+
     if isinstance(proxy_value, dict):
-        server = str(proxy_value.get("server", "")).strip()
+        server = str(proxy_value.get("server") or "").strip()
+        if not server and proxy_value.get("host") and proxy_value.get("port"):
+            server = f"{proxy_value.get('host')}:{proxy_value.get('port')}"
         if not server:
             return None
-        if "://" not in server:
-            server = f"http://{server}"
-        proxy_config = {"server": server}
-        username = proxy_value.get("username")
-        password = proxy_value.get("password")
+        proxy_config = split_auth_url(server) or {"server": with_scheme(server)}
+        username = proxy_value.get("username") or proxy_value.get("user")
+        password = proxy_value.get("password") or proxy_value.get("pass")
         if username is not None and str(username).strip():
             proxy_config["username"] = str(username).strip()
         if password is not None and str(password).strip():
@@ -285,13 +329,30 @@ def parse_proxy_object(proxy_value):
     if not raw:
         return None
     if "://" in raw:
-        return {"server": raw}
+        parsed_proxy = split_auth_url(raw)
+        return parsed_proxy or {"server": raw}
+
+    if "@" in raw:
+        credentials, server = raw.rsplit("@", 1)
+        proxy_config = split_auth_url(server) or {"server": with_scheme(server)}
+        if ":" in credentials:
+            username, password = credentials.split(":", 1)
+            proxy_config["username"] = unquote(username.strip())
+            proxy_config["password"] = unquote(password.strip())
+        return proxy_config
+
     parts = raw.split(":")
     if len(parts) >= 4:
-        host = parts[0].strip()
-        port = parts[1].strip()
-        username = parts[2].strip()
-        password = ":".join(parts[3:]).strip()
+        if parts[1].strip().isdigit():
+            host = parts[0].strip()
+            port = parts[1].strip()
+            username = parts[2].strip()
+            password = ":".join(parts[3:]).strip()
+        else:
+            username = parts[0].strip()
+            password = parts[1].strip()
+            host = parts[2].strip()
+            port = parts[3].strip()
         return {
             "server": f"http://{host}:{port}",
             "username": username,
@@ -313,15 +374,16 @@ def build_browser_launch_args(proxy_value):
 def short_proxy(proxy_value, limit=24):
     if not proxy_value:
         return "DIRECT"
-    if isinstance(proxy_value, dict):
-        proxy_value = proxy_value.get("server") or str(proxy_value)
-    proxy_value = str(proxy_value)
+    parsed_proxy = parse_proxy_object(proxy_value)
+    proxy_value = (parsed_proxy or {}).get("server") or str(proxy_value)
     return proxy_value if len(proxy_value) <= limit else proxy_value[:limit - 3] + "..."
 
 
 def proxy_key(proxy_value):
-    if isinstance(proxy_value, dict):
-        return str(proxy_value.get("server") or proxy_value).strip()
+    parsed_proxy = parse_proxy_object(proxy_value)
+    if parsed_proxy:
+        username = parsed_proxy.get("username", "")
+        return f"{parsed_proxy.get('server', '').strip()}|{username}"
     return str(proxy_value).strip()
 
 def stop_page_loading(page):
@@ -332,6 +394,33 @@ def stop_page_loading(page):
             page.keyboard.press("Escape")
         except Exception:
             pass
+
+def get_page_body_text(page, timeout=1500):
+    try:
+        return page.locator("body").inner_text(timeout=timeout)
+    except Exception:
+        return ""
+
+def is_proxy_auth_error_text(text):
+    text = str(text or "").lower()
+    return (
+        "not authenticated" in text
+        or "invalid authentication credentials" in text
+        or "proxy username" in text
+        or "proxy address" in text and "proxy username" in text
+    )
+
+def assert_not_proxy_auth_error(page, assigned_proxy):
+    body_text = get_page_body_text(page)
+    if not is_proxy_auth_error_text(body_text):
+        return
+
+    if assigned_proxy:
+        BAD_PROXY_BLACKLIST.add(proxy_key(assigned_proxy))
+    raise TimeoutError(
+        f"Proxy bi tu choi xac thuc: {short_proxy(assigned_proxy)}. "
+        "Kiem tra server/username/password/port cua proxy."
+    )
 
 def wait_for_outlook_ready(page):
     page.wait_for_selector(EMAIL_INPUT_SELECTOR, state="visible", timeout=OUTLOOK_READY_TIMEOUT_MS)
@@ -346,7 +435,10 @@ def load_outlook_signup_page(page, worker_id, assigned_proxy):
             timeout=OUTLOOK_NAVIGATION_TIMEOUT_MS,
             wait_until="commit"
         )
+        assert_not_proxy_auth_error(page, assigned_proxy)
     except Exception as nav_err:
+        if "Proxy bi tu choi xac thuc" in str(nav_err):
+            raise
         stop_page_loading(page)
         proxy_hint = f" qua proxy {short_proxy(assigned_proxy)}" if assigned_proxy else " truc tiep"
         timeout_seconds = OUTLOOK_NAVIGATION_TIMEOUT_MS // 1000
@@ -355,6 +447,7 @@ def load_outlook_signup_page(page, worker_id, assigned_proxy):
     try:
         wait_for_outlook_ready(page)
     except Exception as ready_err:
+        assert_not_proxy_auth_error(page, assigned_proxy)
         stop_page_loading(page)
         title = ""
         try:
