@@ -98,6 +98,11 @@ CONFIG = {
     }
 }
 
+CAPTCHA_INITIAL_WAIT_MS = 8000
+CAPTCHA_HOLD_MIN_MS = 6500
+CAPTCHA_HOLD_MAX_MS = 8500
+CAPTCHA_POST_HOLD_WAIT_MS = 1800
+
 CONFIG_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "config.json")
 
 def apply_runtime_timeouts():
@@ -547,40 +552,100 @@ class PlaywrightWorkerController:
             except Exception: pass
 
     def handle_captcha(self, page, worker_id, ws):
-        try:
-            ws(6, "Dang cho event xac thuc captcha...")
-            page.wait_for_event("request", lambda req: req.url.startswith("blob:https://iframe.hsprotect.net/"), timeout=22000)
-            page.wait_for_timeout(800)
-        except Exception:
-            return True # Co the khong co captcha
+        def captcha_retry_text_visible():
+            body_text = get_page_body_text(page, timeout=1000).lower()
+            return "try again" in body_text or "vui" in body_text
 
-        for attempt in range(1, self.max_captcha_retries + 2):
-            if should_stop: return False
-            ws(6, f"Xac thuc Captcha... (Lan {attempt})")
-            page.keyboard.press('Enter')
-            page.wait_for_timeout(11500)
-            page.keyboard.press('Enter')
+        def find_hold_button(timeout_ms):
+            deadline = time.time() + timeout_ms / 1000
+            selectors = [
+                'button:has-text("Hold")',
+                '[role="button"]:has-text("Hold")',
+                'button:has-text("Press")',
+                '[role="button"]:has-text("Press")',
+                'button:has-text("Nh")',
+                '[role="button"]:has-text("Nh")',
+                'button',
+                '[role="button"]',
+            ]
 
+            while time.time() < deadline and not should_stop:
+                scopes = [page] + list(page.frames)
+                fallback = None
+                fallback_area = 0
+                for scope in scopes:
+                    for selector in selectors:
+                        try:
+                            locator = scope.locator(selector)
+                            for idx in range(min(locator.count(), 8)):
+                                candidate = locator.nth(idx)
+                                if not candidate.is_visible(timeout=250):
+                                    continue
+                                box = candidate.bounding_box(timeout=500)
+                                if not box or box["width"] < 80 or box["height"] < 28:
+                                    continue
+                                text = ""
+                                try:
+                                    text = candidate.inner_text(timeout=250).strip().lower()
+                                except Exception:
+                                    pass
+                                if "hold" in text or "press" in text or "nh" in text:
+                                    return candidate
+                                area = box["width"] * box["height"]
+                                if area > fallback_area:
+                                    fallback = candidate
+                                    fallback_area = area
+                        except Exception:
+                            continue
+                if fallback is not None:
+                    return fallback
+                page.wait_for_timeout(400)
+            return None
+
+        def press_and_hold(locator, duration_ms):
+            box = locator.bounding_box(timeout=1000)
+            if not box:
+                return False
+            x = box["x"] + box["width"] / 2
+            y = box["y"] + box["height"] / 2
+            page.mouse.move(x, y, steps=random.randint(8, 14))
+            page.wait_for_timeout(random.randint(150, 350))
+            page.mouse.down()
             try:
-                page.wait_for_event("request", lambda req: req.url.startswith("https://browser.events.data.microsoft.com"), timeout=8000)
-                try:
-                    page.wait_for_event("request", lambda req: req.url.startswith("https://collector-pxzc5j78di.hsprotect.net/assets/js/bundle"), timeout=1700)
-                    page.wait_for_timeout(2000)
-                    continue
-                except:
-                    if page.get_by_text('异常活动').count() or page.get_by_text('维护').count() > 0:
-                        log("IP bi gioi han tan suat (Rate Limit).", "ERROR", worker_id)
-                        return False
-                    break
-            except:
-                page.wait_for_timeout(5000)
-                page.keyboard.press('Enter')
-                try:
-                    page.wait_for_event("request", lambda req: req.url.startswith("https://browser.events.data.microsoft.com"), timeout=10000)
-                    page.wait_for_event("request", lambda req: req.url.startswith("https://collector-pxzc5j78di.hsprotect.net/assets/js/bundle"), timeout=4000)
-                except:
-                    break
-        return True
+                page.wait_for_timeout(duration_ms)
+            finally:
+                page.mouse.up()
+            return True
+
+        ws(6, "Tim nut captcha nhan-giu...")
+        hold_button = find_hold_button(CAPTCHA_INITIAL_WAIT_MS)
+        if hold_button is None:
+            return True
+
+        max_attempts = max(1, min(int(self.max_captcha_retries or 1), 2))
+        for attempt in range(1, max_attempts + 1):
+            if should_stop:
+                return False
+            ws(6, f"Giu nut captcha... (Lan {attempt}/{max_attempts})")
+            try:
+                press_and_hold(hold_button, random.randint(CAPTCHA_HOLD_MIN_MS, CAPTCHA_HOLD_MAX_MS))
+                page.wait_for_timeout(CAPTCHA_POST_HOLD_WAIT_MS)
+            except Exception as exc:
+                log(f"Loi thao tac captcha nhan-giu: {exc}", "WARN", worker_id)
+
+            if page.get_by_text('异常活动').count() or page.get_by_text('维护').count() > 0:
+                log("IP bi gioi han tan suat (Rate Limit).", "ERROR", worker_id)
+                return False
+
+            if not captcha_retry_text_visible():
+                return True
+
+            hold_button = find_hold_button(2500)
+            if hold_button is None:
+                return False
+
+        log("Captcha nhan-giu bi Microsoft yeu cau thu lai qua nhieu lan.", "WARN", worker_id)
+        return False
 
     def register(self, page, email, password, worker_id, ws):
         # Tự động sinh tên ngẫu nhiên an toàn (không lo thiếu thư viện faker)
@@ -651,21 +716,21 @@ class PlaywrightWorkerController:
             full_email = build_full_email(email, self.email_suffix)
 
             # Mô phỏng người dùng nhập email chậm rãi
-            page.wait_for_timeout(random.randint(800, 2000))
+            page.wait_for_timeout(random.randint(250, 700))
             email_input.fill(full_email)
-            page.wait_for_timeout(random.randint(1500, 3000)) # Trì hoãn trước khi click Next
+            page.wait_for_timeout(random.randint(400, 900)) # Trì hoãn trước khi click Next
             page.locator(NEXT_BUTTON_SELECTOR).click()
-            page.wait_for_timeout(random.randint(2000, 4000)) # Trì hoãn chờ trang load tiếp
+            page.wait_for_timeout(random.randint(800, 1500)) # Trì hoãn chờ trang load tiếp
 
             # === BƯỚC 2: NHẬP PASSWORD ===
             ws(3, "Nhap password...")
             page.wait_for_selector('input[type="password"]', timeout=15000)
 
-            page.wait_for_timeout(random.randint(800, 1800))
+            page.wait_for_timeout(random.randint(250, 700))
             page.locator('input[type="password"]').fill(password)
-            page.wait_for_timeout(random.randint(1500, 3000)) # Trì hoãn trước khi click Next
+            page.wait_for_timeout(random.randint(400, 900)) # Trì hoãn trước khi click Next
             page.locator(NEXT_BUTTON_SELECTOR).click()
-            page.wait_for_timeout(random.randint(2000, 4000)) # Trì hoãn chờ trang load tiếp
+            page.wait_for_timeout(random.randint(800, 1500)) # Trì hoãn chờ trang load tiếp
 
             # === BƯỚC 3: NGÀY THÁNG NĂM SINH (ADD DETAILS) ===
             ws(4, "Dien ngay thang nam sinh...")
@@ -721,11 +786,11 @@ class PlaywrightWorkerController:
             # 3. Nhập Year sau cùng
             page.locator('input[name="BirthYear"]').fill("")
             page.locator('input[name="BirthYear"]').type(year, delay=random.randint(80, 150))
-            page.wait_for_timeout(random.randint(1500, 3000)) # Trì hoãn trước khi click Next
+            page.wait_for_timeout(random.randint(500, 1000)) # Trì hoãn trước khi click Next
 
             # Click Next
             page.locator(NEXT_BUTTON_SELECTOR).click()
-            page.wait_for_timeout(random.randint(2000, 4000)) # Trì hoãn chờ trang load tiếp
+            page.wait_for_timeout(random.randint(900, 1600)) # Trì hoãn chờ trang load tiếp
 
             # === BƯỚC 4: NHẬP HỌ TÊN (ADD NAME) ===
             ws(5, "Dien ho ten...")
@@ -740,7 +805,7 @@ class PlaywrightWorkerController:
             if time.time() - start_time < self.wait_time / 1000:
                 page.wait_for_timeout(self.wait_time - (time.time() - start_time) * 1000)
 
-            page.wait_for_timeout(random.randint(1500, 3000)) # Trì hoãn trước khi click Next
+            page.wait_for_timeout(random.randint(500, 1000)) # Trì hoãn trước khi click Next
             page.locator(NEXT_BUTTON_SELECTOR).click()
 
             # Đợi load qua trang xác thực
@@ -979,9 +1044,22 @@ def register_one_outlook(worker_id, account_index, assigned_proxy):
         # Tăng tốc độ load trang Outlook bằng cách chặn các tài nguyên nặng và tracking quảng cáo
         def block_useless_resources(route):
             req_type = route.request.resource_type
-            url = response_url = route.request.url.lower()
+            url = route.request.url.lower()
+            captcha_asset = any(token in url for token in (
+                "captcha",
+                "hsprotect",
+                "hip",
+                "enforcement",
+                "solve_captcha",
+                "fluent_web",
+                "signup.live.com",
+                "login.live.com",
+                "logincdn",
+                "microsoft",
+                "msauth",
+            ))
             if (
-                req_type in ("image", "font", "media")
+                (req_type in ("font", "media") and not captcha_asset)
                 or "google-analytics" in url
                 or "googletagmanager" in url
                 or "mixpanel" in url
