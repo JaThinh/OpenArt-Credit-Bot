@@ -142,8 +142,11 @@ def check_configs() -> tuple[bool, dict, dict]:
 
 def check_project_imports() -> bool:
     success = True
-    sys.path.insert(0, str(ROOT))
+    for import_path in (str(ROOT), str(OUTLOOK_DIR)):
+        while import_path in sys.path:
+            sys.path.remove(import_path)
     sys.path.insert(0, str(OUTLOOK_DIR))
+    sys.path.insert(0, str(ROOT))
 
     for module_name in (
         "vpn_manager",
@@ -151,6 +154,10 @@ def check_project_imports() -> bool:
         "playwright_input_utils",
         "playwright_fault_tolerance",
         "playwright_session_manager",
+        "advanced_orchestrator",
+        "OutlookRegister.network_service",
+        "OutlookRegister.playwright_session_manager",
+        "OutlookRegister.utils_flow",
     ):
         try:
             importlib.import_module(module_name)
