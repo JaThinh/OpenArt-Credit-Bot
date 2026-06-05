@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import asyncio
+import random
 import shutil
 import tempfile
 from contextlib import asynccontextmanager, suppress
@@ -46,6 +47,35 @@ class BrowserSessionResult:
 
 SessionHandler = Callable[[WorkerSandboxSession, AutomationTask, dict[str, Any], int], Awaitable[Any]]
 SyncFunction = Callable[..., Any]
+
+
+class PlaywrightSessionManager:
+    """Compatibility context factory used by async Outlook orchestrators."""
+
+    @staticmethod
+    async def create_trust_context(
+        browser: Browser,
+        user_agents: Optional[list[str]] = None,
+        worker_id: int = 0,
+    ) -> BrowserContext:
+        from network_service import NetworkService
+
+        _ = worker_id
+        ip_meta = await NetworkService.get_ip_metadata()
+        selected_ua = random.choice(user_agents or [
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+            "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
+        ])
+        return await browser.new_context(
+            user_agent=selected_ua,
+            viewport={"width": 1366, "height": 768},
+            device_scale_factor=1,
+            is_mobile=False,
+            has_touch=False,
+            locale="en-US" if ip_meta.get("country_code") != "VN" else "vi-VN",
+            timezone_id=ip_meta.get("timezone") or "America/New_York",
+            ignore_https_errors=True,
+        )
 
 async def execute_sync_module_safe(sync_function: SyncFunction, *args: Any, **kwargs: Any) -> Any:
     """Run a synchronous helper in a worker thread without blocking the event loop.

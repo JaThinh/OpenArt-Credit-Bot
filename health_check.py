@@ -155,8 +155,6 @@ def check_project_imports() -> bool:
         "playwright_fault_tolerance",
         "playwright_session_manager",
         "advanced_orchestrator",
-        "OutlookRegister.network_service",
-        "OutlookRegister.playwright_session_manager",
         "OutlookRegister.utils_flow",
     ):
         try:
