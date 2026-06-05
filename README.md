@@ -256,6 +256,37 @@ Module này đọc thêm các key kiểu `change_ip_mode` hoặc `num_fail_to_ch
 - Nên dùng file config mẫu riêng nếu muốn chia sẻ project cho người khác.
 - Nếu secret từng nằm trong git history, hãy coi như đã lộ và rotate password/token/API/proxy liên quan. Xóa khỏi HEAD không xóa được lịch sử đã public.
 
+## Anti-detect và Proxy (Khuyến nghị)
+
+- **Không dùng** proxy miễn phí, shared proxy, hoặc rotating/mobile proxies chất lượng thấp.
+- Ưu tiên dùng **Static Residential Proxy (ISP)** hoặc **Dedicated Mobile Proxy (4G/5G)** từ nhà mạng lớn để giảm rủi ro bị block bởi hệ thống `risk/verify`.
+- Để tích hợp công cụ anti-detect (AdsPower/Gologin), chỉnh `OutlookRegister/config.json` thêm phần `playwright.antidetect` và bật `enabled: true`. Ví dụ:
+
+```json
+"playwright": {
+  "browser_path": "",
+  "antidetect": {
+    "enabled": true,
+    "provider": "adspower",
+    "profile_id": "your_profile_id",
+    "local_api": "http://local.adspower.net:50325",
+    "api_key": "your_api_key_if_enabled",
+    "api_key_header": "Authorization"
+  }
+}
+```
+
+Hoặc gọi trực tiếp `adspower_test.py` không cần nhập tương tác:
+
+```powershell
+cd D:\OpenArt-Credit-Bot\OutlookRegister
+python adspower_test.py --profile-id k1d2udx3 --local-api http://local.adspower.net:50325 --api-key your_api_key
+```
+
+- Hiện tại code hỗ trợ kết nối tới AdsPower qua API cục bộ (ws puppeteer endpoint). Sau khi bật, bot sẽ cố gắng kết nối profile và điều khiển cửa sổ trình duyệt sạch thay vì khởi chạy Playwright local.
+- Nếu AdsPower hiển thị `http://local.adspower.net:50325`, hãy dùng `local_api` đó thay vì `127.0.0.1:5015`.
+- Nếu AdsPower bật `API verification`, hãy điền `api_key` vào config và có thể phải dùng `api_key_header` phù hợp với header yêu cầu (mặc định `Authorization`).
+
 ## Xử lý lỗi thường gặp
 
 - Thiếu package: chạy lại `python -m pip install -r requirements.txt` trong `.venv`.

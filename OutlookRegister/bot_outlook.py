@@ -9,10 +9,21 @@ import sys
 import threading
 import time
 import unicodedata
+
+ROOT_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+OUTLOOK_DIR = os.path.dirname(os.path.abspath(__file__))
+if ROOT_DIR not in sys.path:
+    sys.path.insert(0, ROOT_DIR)
+if OUTLOOK_DIR not in sys.path:
+    sys.path.insert(0, OUTLOOK_DIR)
+
+from vpn_manager import VpnManager
+
+# Khởi tạo duy nhất 1 bộ điều phối VPN dùng chung cho toàn bộ tiểu luồng (Workers)
+vpn_orchestrator = VpnManager()
 from datetime import datetime
 from utils import random_email, generate_strong_password, get_random_user_agent
 from get_token import get_access_token
-
 # Cấu hình UTF-8 cho console output trên Windows tránh lỗi UnicodeEncodeError
 if hasattr(sys.stdout, 'reconfigure'):
     try:
@@ -26,8 +37,10 @@ if hasattr(sys.stderr, 'reconfigure'):
         pass
 
 try:
+    from playwright.sync_api import TimeoutError as PlaywrightTimeoutError
     from playwright.sync_api import sync_playwright
 except ImportError:
+    PlaywrightTimeoutError = TimeoutError
     pass
 
 # ============ STATE ============
@@ -44,6 +57,8 @@ proxy_cache_lock = threading.Lock()
 should_stop = False
 is_paused = False
 lock = threading.Lock()
+manual_hold_coordinate_lock = threading.Lock()
+manual_hold_coordinates = {}
 SESSION_LOG_FILE = f"outlook_{datetime.now().strftime('%Y%m%d_%H%M%S')}.txt"
 ui_log_lines = []
 MAX_UI_LOG_LINES = 1000
@@ -76,7 +91,7 @@ NEXT_BUTTON_SELECTOR = (
 )
 
 CONFIG = {
-    "choose_browser": "chromium",
+    "choose_browser": "firefox",
     "email_suffix": "@hotmail.com",
     "proxy": "",
     "use_parent_proxies": False,
@@ -85,6 +100,7 @@ CONFIG = {
     "concurrent_flows": 1,
     "max_tasks": 1000,
     "headless": False,
+    "mobile_view": True,
     "timeout_secs": 20,
     "launch_timeout_ms": 15000,
     "proxies": [],
@@ -100,12 +116,139 @@ CONFIG = {
 }
 
 CAPTCHA_INITIAL_WAIT_MS = 6000
-CAPTCHA_HOLD_MIN_MS = 5200
-CAPTCHA_HOLD_MAX_MS = 6800
-CAPTCHA_POST_HOLD_WAIT_MS = 1200
 CAPTCHA_RESULT_WAIT_MS = 14000
 
 CONFIG_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "config.json")
+
+
+DEFAULT_POST_GATE_SELECTORS = (
+    "#idSIButton9",
+    "input[id='idSIButton9']",
+    "#main-dashboard",
+    ".session-ready",
+    ".user-profile-loaded",
+    "[data-testid='user-menu']",
+    "#main-content",
+)
+CHECKPOINT_MESSAGE = (
+    "[SYSTEM] Process paused. Press ENTER in this console once the page state "
+    "is verified, or wait for automatic target element detection..."
+)
+
+
+def _normalize_gate_selectors(post_gate_selectors=None):
+    if post_gate_selectors is None:
+        return DEFAULT_POST_GATE_SELECTORS
+    if isinstance(post_gate_selectors, str):
+        selector = post_gate_selectors.strip()
+        return (selector,) if selector else DEFAULT_POST_GATE_SELECTORS
+
+    selectors = tuple(
+        str(selector).strip()
+        for selector in post_gate_selectors
+        if str(selector).strip()
+    )
+    return selectors or DEFAULT_POST_GATE_SELECTORS
+
+
+def _stdin_enter_pressed():
+    if os.name == "nt":
+        try:
+            import msvcrt
+        except ImportError:
+            return False
+
+        while msvcrt.kbhit():
+            key = msvcrt.getwch()
+            if key in ("\r", "\n"):
+                return True
+            if key in ("\x00", "\xe0") and msvcrt.kbhit():
+                msvcrt.getwch()
+        return False
+
+    try:
+        import select
+
+        readable, _, _ = select.select([sys.stdin], [], [], 0)
+    except (OSError, ValueError):
+        return False
+    if not readable:
+        return False
+
+    sys.stdin.readline()
+    return True
+
+
+def _post_gate_selector_visible(page, selectors, timeout_ms=250):
+    for selector in selectors:
+        try:
+            page.wait_for_selector(selector, state="visible", timeout=timeout_ms)
+            return selector
+        except PlaywrightTimeoutError:
+            continue
+        except Exception:
+            continue
+    return None
+
+
+def manual_checkpoint_gate(
+    page,
+    timeout_seconds=120,
+    post_gate_selectors=None,
+    worker_id=0,
+    post_gate_selector=None,
+):
+    if post_gate_selector is not None and post_gate_selectors is None:
+        post_gate_selectors = post_gate_selector
+    if timeout_seconds <= 0:
+        raise ValueError("timeout_seconds must be greater than zero")
+
+    selectors = _normalize_gate_selectors(post_gate_selectors)
+    deadline = time.monotonic() + timeout_seconds
+
+    print(CHECKPOINT_MESSAGE, flush=True)
+    try:
+        log("Gate Alpha paused for manual operator action.", "WARN", worker_id)
+        log(f"Current URL: {getattr(page, 'url', '')}", "INFO", worker_id)
+        try:
+            log(f"Page title: {page.title()}", "INFO", worker_id)
+        except Exception:
+            pass
+    except Exception:
+        pass
+
+    while time.monotonic() < deadline:
+        if globals().get("should_stop", False):
+            raise TimeoutError("[ERROR] Manual checkpoint interrupted by stop request.")
+
+        if _stdin_enter_pressed():
+            print("[SYSTEM] Manual ENTER received. Resuming workflow.", flush=True)
+            return "manual-enter"
+
+        matched_selector = _post_gate_selector_visible(page, selectors)
+        if matched_selector:
+            print(
+                f"[SYSTEM] Post-gate selector detected: {matched_selector}. Resuming workflow.",
+                flush=True,
+            )
+            return f"selector:{matched_selector}"
+
+        try:
+            body_text = normalize_visible_text(get_page_body_text(page, timeout=500))
+        except Exception:
+            body_text = ""
+        body_text = body_text.lower()
+        if any(token in body_text for token in ("security verification completed", "you're all set", "welcome", "inbox", "continue")):
+            print("[SYSTEM] Post-gate page text detected. Resuming workflow.", flush=True)
+            return "text-detected"
+
+        time.sleep(0.1)
+
+    raise TimeoutError(
+        f"[ERROR] Manual checkpoint timed out after {timeout_seconds} seconds. Aborting safely."
+    )
+
+
 
 def apply_runtime_timeouts():
     global OUTLOOK_NAVIGATION_TIMEOUT_MS, OUTLOOK_READY_TIMEOUT_MS, OUTLOOK_ACTION_TIMEOUT_MS, BROWSER_LAUNCH_TIMEOUT_MS
@@ -118,13 +261,13 @@ def apply_runtime_timeouts():
         15000,
     )
 
-def normalize_chromium_browser_path(browser_path):
+def normalize_firefox_browser_path(browser_path):
     browser_path = str(browser_path or "").strip()
     if not browser_path or not os.path.exists(browser_path):
         return ""
 
     executable_name = os.path.basename(browser_path).lower()
-    if any(name in executable_name for name in ("chrome", "chromium", "msedge")):
+    if "firefox" in executable_name:
         return os.path.abspath(browser_path)
     return ""
 
@@ -216,8 +359,8 @@ def load_config():
     if "playwright" not in CONFIG or not isinstance(CONFIG.get("playwright"), dict):
         CONFIG["playwright"] = {"browser_path": ""}
 
-    CONFIG["choose_browser"] = "chromium"
-    CONFIG["playwright"]["browser_path"] = normalize_chromium_browser_path(
+    CONFIG["choose_browser"] = "firefox"
+    CONFIG["playwright"]["browser_path"] = normalize_firefox_browser_path(
         CONFIG["playwright"].get("browser_path", "")
     )
     apply_runtime_timeouts()
@@ -231,8 +374,8 @@ def save_config():
 
 load_config()
 
-# Outlook flow is Chromium-only to avoid Firefox profile-lock popups.
-CONFIG["choose_browser"] = "chromium"
+# Outlook flow uses Camoufox sync on Firefox.
+CONFIG["choose_browser"] = "firefox"
 
 OUTLOOK_SIGNUP_URL = normalize_signup_url(CONFIG.get("SIGNUP_URL", ""))
 
@@ -423,6 +566,16 @@ def normalize_visible_text(value):
     text = "".join(ch for ch in text if unicodedata.category(ch) != "Mn")
     return text.replace("đ", "d")
 
+def load_mouse_recorder_helpers():
+    try:
+        from mouse_recorder import get_manual_coordinate, perform_press_and_hold
+    except ImportError:
+        repo_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        if repo_root not in sys.path:
+            sys.path.insert(0, repo_root)
+        from mouse_recorder import get_manual_coordinate, perform_press_and_hold
+    return get_manual_coordinate, perform_press_and_hold
+
 def is_proxy_auth_error_text(text):
     text = normalize_visible_text(text)
     return (
@@ -492,55 +645,80 @@ class PlaywrightWorkerController:
         self.browser_path = CONFIG["playwright"]["browser_path"]
         self.thread_local = threading.local()
 
+
     def launch_browser(self):
+        """
+        Launch Camoufox through the sync Playwright runtime for the Outlook flow.
+        """
+        p = None
         try:
             import asyncio
+            from browserforge.fingerprints import Screen
+            from camoufox.sync_api import NewBrowser
+
             try:
-                # Dập tắt loop đang tồn tại trên thread này để sync_playwright hoạt động an toàn
                 asyncio.set_event_loop(None)
             except Exception:
                 pass
+
             p = sync_playwright().start()
-            launch_args = build_browser_launch_args(self.proxy)
-            launch_options = {
-                "headless": CONFIG.get("headless", False),
+            CONFIG["choose_browser"] = "firefox"
+            log("Dang kich hoat trinh duyet Camoufox sync (Firefox Core)...", "INFO")
+
+            camoufox_executable = (self.browser_path or "").strip()
+            if camoufox_executable and not os.path.exists(camoufox_executable):
+                log(f"Khong tim thay Firefox executable: {camoufox_executable}. Se dung Camoufox mac dinh.", "WARN")
+                camoufox_executable = None
+            if camoufox_executable:
+                camoufox_props = os.path.join(os.path.dirname(camoufox_executable), "properties.json")
+                if not os.path.exists(camoufox_props):
+                    log(
+                        "browser_path dang tro toi Firefox runtime cua Playwright, khong phai Camoufox runtime. "
+                        "Se dung Camoufox mac dinh de tranh loi properties.json.",
+                        "WARN",
+                    )
+                    camoufox_executable = None
+
+            camoufox_options = {
+                "headless": False,
                 "timeout": BROWSER_LAUNCH_TIMEOUT_MS,
+                "os": "windows",
+                "block_webgl": False,
+                "screen": Screen(
+                    min_width=1920,
+                    max_width=1920,
+                    min_height=1080,
+                    max_height=1080,
+                ),
+                "window": (1920, 1080),
                 "args": [
-                    "--no-sandbox",
-                    "--disable-dev-shm-usage",
-                    "--disable-blink-features=AutomationControlled",
-                    "--disable-gpu",
-                    "--disable-webrtc",
+                    "--width=1920",
+                    "--height=1080",
                 ],
+                "firefox_user_prefs": {
+                    "webgl.disabled": False,
+                    "webgl.force-enabled": True,
+                    "webgl.enable-webgl2": True,
+                    "layers.acceleration.force-enabled": True,
+                    "gfx.webrender.all": True,
+                    "media.hardware-video-decoding.enabled": True,
+                },
             }
-            # Chỉ gán executable_path nếu có đường dẫn hợp lệ
-            browser_path_lower = (self.browser_path or "").lower()
-            is_chromium_path = any(name in browser_path_lower for name in ("chrome", "chromium", "msedge"))
-            if self.browser_path and os.path.exists(self.browser_path) and is_chromium_path:
-                launch_options["executable_path"] = self.browser_path
-            launch_options.update(launch_args)
+            if camoufox_executable:
+                camoufox_options["executable_path"] = camoufox_executable
+            camoufox_options.update(build_browser_launch_args(self.proxy))
 
-            # Chọn engine trình duyệt theo config choose_browser
-            CONFIG["choose_browser"] = "chromium"
-            chosen = "chromium"
-
-            if chosen in ("chromium", "chrome", "playwright") or "chrome" in browser_path_lower or "google" in browser_path_lower:
-                # Chromium: hỗ trợ đầy đủ is_mobile, has_touch, device_scale_factor
-                b = p.chromium.launch(**launch_options)
-                self.browser_type = "chromium"
-                log("Đã khởi chạy nhân Chromium (hỗ trợ Mobile Emulation).", "INFO")
-            elif False:
-                b = p.firefox.launch(**launch_options)
-                self.browser_type = "firefox"
-                log("Đã khởi chạy nhân Firefox (Desktop Responsive). Mobile flags sẽ bị bỏ qua.", "INFO")
-            else:
-                # Mặc định: dùng Chromium
-                b = p.chromium.launch(**launch_options)
-                self.browser_type = "chromium"
-                log(f"choose_browser='{chosen}' không nhận diện, fallback sang Chromium.", "WARN")
+            b = NewBrowser(p, **camoufox_options)
+            self.browser_type = "firefox"
+            log("Da khoi chay Camoufox sync bang nhan Firefox.", "INFO")
             return p, b
         except Exception as e:
-            raise RuntimeError(f"Loi khoi chay trinh duyet: {e}")
+            if p is not None:
+                try:
+                    p.stop()
+                except Exception:
+                    pass
+            raise RuntimeError(f"Loi khoi chay engine Camoufox cho Outlook: {e}")
 
     def get_browser(self):
         if not hasattr(self.thread_local, "browser"):
@@ -629,173 +807,92 @@ class PlaywrightWorkerController:
         year_input.wait_for(state="visible", timeout=8000)
         year_input.fill(str(year))
 
-    def handle_captcha(self, page, worker_id, ws):
-        def captcha_retry_text_visible():
-            body_text = normalize_visible_text(get_page_body_text(page, timeout=1000))
-            return (
-                "try again" in body_text
-                or "try another" in body_text
-                or "vui long thu lai" in body_text
-                or "thu lai" in body_text
-            )
-
-        def enforcement_frame_visible():
-            selectors = (
-                'iframe#enforcementFrame',
-                'iframe[src*="enforcement"]',
-                'iframe[src*="arkose"]',
-                'iframe[src*="funcaptcha"]',
-                'iframe[src*="captcha"]',
-                'iframe[src*="crcldu"]',
-            )
-            for selector in selectors:
-                try:
-                    locator = page.locator(selector)
-                    for idx in range(min(locator.count(), 3)):
-                        if locator.nth(idx).is_visible(timeout=200):
-                            return True
-                except Exception:
-                    continue
+    def perform_manual_coordinate_hold(self, worker_id, ws):
+        try:
+            get_manual_coordinate, perform_press_and_hold = load_mouse_recorder_helpers()
+        except Exception as exc:
+            log(f"Khong nap duoc mouse_recorder: {exc}", "WARN", worker_id)
             return False
 
-        def captcha_challenge_visible():
-            body_text = normalize_visible_text(get_page_body_text(page, timeout=1000))
-            return (
-                "chứng minh" in body_text
-                or "nhấn và giữ" in body_text
-                or "nhan va giu" in body_text
-                or "chung minh" in body_text
-                or "prove" in body_text and "human" in body_text
-                or "press and hold" in body_text
-                or "verify" in body_text and "human" in body_text
-                or enforcement_frame_visible()
-            )
+        ws(6, "Đang chờ cấu hình tọa độ giữ chuột...")
+        with manual_hold_coordinate_lock:
+            pos = manual_hold_coordinates.get(worker_id)
+            if pos is None:
+                pos = get_manual_coordinate(timeout_seconds=60)
+                if pos:
+                    manual_hold_coordinates[worker_id] = pos
 
-        def scope_is_captcha(scope):
-            if scope is page:
-                return captcha_challenge_visible()
+        if pos:
+            target_x, target_y = pos
+            ws(6, "Đang tự động thực hiện nhấn giữ tọa độ...")
+            perform_press_and_hold(target_x, target_y, duration_ms=5500)
+            return True
+
+        log("Không lấy được tọa độ, chuyển hướng sang chế độ chờ thủ công hoàn toàn.", "WARN", worker_id)
+        return False
+
+    def handle_captcha(self, page, worker_id, ws):
+        """
+        B? qu?n l? ?i?m d?ng t??ng t?c n?ng cao (Advanced Interactive State Gate).
+        T?m d?ng ti?n tr?nh t? ??ng ?? ng??i d?ng th?c hi?n c?c thao t?c v?t l? th?t tr?n m?n h?nh.
+        """
+        ws(6, "?ang qu?t tr?ng th?i h? th?ng...")
+        page.wait_for_timeout(2000)  # Sleep ng?n ??m b?o DOM t?i ??y ?? Iframe
+
+        # H?m ki?m tra nhanh s? t?n t?i c?a m?n h?nh x?c th?c
+        def check_security_challenge():
             try:
-                frame_url = str(scope.url or "").lower()
+                body_text = normalize_visible_text(get_page_body_text(page, timeout=500))
+                has_iframe = page.locator('iframe#enforcementFrame, iframe[src*="enforcement"], iframe[src*="arkose"]').count() > 0
+                return "nhan va giu" in body_text or "prove" in body_text or has_iframe
             except Exception:
-                frame_url = ""
-            return any(token in frame_url for token in (
-                "captcha",
-                "enforcement",
-                "arkose",
-                "funcaptcha",
-                "hsprotect",
-                "crcldu",
-            ))
-
-        def wait_for_captcha_result(timeout_ms):
-            deadline = time.time() + timeout_ms / 1000
-            while time.time() < deadline and not should_stop:
-                if captcha_retry_text_visible():
-                    return "retry"
-                if not captcha_challenge_visible():
-                    return "passed"
-                page.wait_for_timeout(400)
-            return "pending"
-
-        def find_hold_button(timeout_ms):
-            deadline = time.time() + timeout_ms / 1000
-            no_challenge_deadline = time.time() + 1.6
-            selectors = [
-                'button:has-text("Hold")',
-                '[role="button"]:has-text("Hold")',
-                'button:has-text("Press")',
-                '[role="button"]:has-text("Press")',
-                'button',
-                '[role="button"]',
-            ]
-
-            while time.time() < deadline and not should_stop:
-                challenge_visible = captcha_challenge_visible()
-                scopes = [page] + list(page.frames)
-                fallback = None
-                fallback_area = 0
-                for scope in scopes:
-                    allow_fallback = scope_is_captcha(scope)
-                    for selector in selectors:
-                        try:
-                            locator = scope.locator(selector)
-                            for idx in range(min(locator.count(), 8)):
-                                candidate = locator.nth(idx)
-                                if not candidate.is_visible(timeout=250):
-                                    continue
-                                box = candidate.bounding_box(timeout=500)
-                                if not box or box["width"] < 80 or box["height"] < 28:
-                                    continue
-                                text = ""
-                                try:
-                                    text = normalize_visible_text(candidate.inner_text(timeout=250)).strip()
-                                except Exception:
-                                    pass
-                                if "hold" in text or "press" in text or "nhan" in text or "giu" in text:
-                                    return candidate
-                                area = box["width"] * box["height"]
-                                if allow_fallback and area > fallback_area:
-                                    fallback = candidate
-                                    fallback_area = area
-                        except Exception:
-                            continue
-                if fallback is not None:
-                    return fallback
-                if not challenge_visible and time.time() >= no_challenge_deadline:
-                    return None
-                page.wait_for_timeout(300)
-            return None
-
-        def press_and_hold(locator, duration_ms):
-            box = locator.bounding_box(timeout=1000)
-            if not box:
                 return False
-            x = box["x"] + box["width"] / 2
-            y = box["y"] + box["height"] / 2
-            page.mouse.move(x, y, steps=random.randint(8, 14))
-            page.wait_for_timeout(random.randint(150, 350))
-            page.mouse.down()
-            try:
-                page.wait_for_timeout(duration_ms)
-            finally:
-                page.mouse.up()
-            return True
 
-        ws(6, "Tim nut captcha nhan-giu...")
-        hold_button = find_hold_button(CAPTCHA_INITIAL_WAIT_MS)
-        if hold_button is None:
-            if captcha_challenge_visible():
-                log("Captcha dang hien nhung khong tim thay nut nhan-giu.", "WARN", worker_id)
-                return False
-            return True
-
-        max_attempts = max(1, min(int(self.max_captcha_retries or 1), 3))
-        for attempt in range(1, max_attempts + 1):
+        # V?ng l?p quan s?t ??ng trong 8 gi?y xem Microsoft c? y?u c?u x?c th?c kh?ng
+        is_challenge_active = False
+        for _ in range(16):
             if should_stop:
                 return False
-            ws(6, f"Giu nut captcha... (Lan {attempt}/{max_attempts})")
-            try:
-                press_and_hold(hold_button, random.randint(CAPTCHA_HOLD_MIN_MS, CAPTCHA_HOLD_MAX_MS))
-                page.wait_for_timeout(CAPTCHA_POST_HOLD_WAIT_MS)
-            except Exception as exc:
-                log(f"Loi thao tac captcha nhan-giu: {exc}", "WARN", worker_id)
+            if check_security_challenge():
+                is_challenge_active = True
+                break
+            page.wait_for_timeout(500)
 
-            if page.get_by_text('异常活动').count() or page.get_by_text('维护').count() > 0:
-                log("IP bi gioi han tan suat (Rate Limit).", "ERROR", worker_id)
-                return False
+        # Tr??ng h?p 1: T?i kho?n s?ch ho?n to?n, kh?ng hi?n Captcha, ?i th?ng v?o Inbox
+        if not is_challenge_active:
+            log("Phi?n l?m vi?c s?ch. B? qua ?i?m d?ng b?o m?t.", "SUCCESS", worker_id)
+            return True
 
-            captcha_result = wait_for_captcha_result(CAPTCHA_RESULT_WAIT_MS)
-            if captcha_result == "passed":
-                return True
-            if captcha_result == "pending":
-                log("Captcha da hien dau tick nhung chua chuyen trang, thu lai nhanh.", "WARN", worker_id)
+        # Tr??ng h?p 2: Ph?t hi?n m?n h?nh x?c th?c, k?ch ho?t ?i?m d?ng t??ng t?c (HITL)
+        log(f"[C?NH B?O B?O M?T] Lu?ng W{worker_id:02d} g?p m?n h?nh 'Nh?n v? Gi?'. Y?u c?u thao t?c chu?t v?t l?!", "WARN", worker_id)
+        ws(6, "Ch? t??ng t?c tay tr?n tr?nh duy?t...")
 
-            hold_button = find_hold_button(2500)
-            if hold_button is None:
-                return False
+        # ??nh ngh?a Selector ??ch c?a m?n h?nh ti?p theo sau khi b?n gi?i xong (V? d?: Trang KMSI Duy tr? ??ng nh?p)
+        target_success_selectors = "#idSIButton9, input[id='idSIButton9'], #main-dashboard, .user-profile-loaded"
 
-        log("Captcha nhan-giu bi Microsoft yeu cau thu lai qua nhieu lan.", "WARN", worker_id)
-        return False
+        try:
+            # G?i h?m manual_checkpoint_gate ?? c? s?n trong m? ngu?n c?a b?n ?? ch?n lu?ng
+            # B?n ch? c?n ??a chu?t v?o c?a s? tr?nh duy?t ?? v? ?? gi? n?t 5-6 gi?y b?ng tay th?t
+            resolved_trigger = manual_checkpoint_gate(
+                page=page,
+                timeout_seconds=90,
+                post_gate_selectors=target_success_selectors,
+                worker_id=worker_id
+            )
+            log(f"Lu?ng W{worker_id:02d} ?? ???c gi?i ph?ng th?nh c?ng qua t?n hi?u: {resolved_trigger}", "SUCCESS", worker_id)
+
+            # Kh?c ph?c l?i ??/treo trang sau khi hi?n t?ch xanh:
+            # ??i 2 gi?y, n?u trang v?n b? k?t ? URL signup c?, th?c hi?n l?nh submit bi?u m?u an to?n
+            page.wait_for_timeout(2000)
+            if "signup.live.com" in page.url:
+                log("Ph?t hi?n tr?ng th?i tr? t?n hi?u, ?ang k?ch ho?t ?i?u h??ng b? tr?...", "INFO", worker_id)
+                page.evaluate("try { document.querySelector('form').submit(); } catch(e) {}")
+
+            return True
+
+        except Exception as exc:
+            log(f"Qu? th?i gian 90 gi?y ch? ??i t??ng t?c tr?n lu?ng W{worker_id:02d}: {exc}", "ERROR", worker_id)
+            return False
 
     def register(self, page, email, password, worker_id, ws):
         # Tự động sinh tên ngẫu nhiên an toàn (không lo thiếu thư viện faker)
@@ -912,6 +1009,15 @@ class PlaywrightWorkerController:
 
             # 2. Chọn Day qua combobox
             day_selected = True
+            for lb in []:
+                if lb.is_visible():
+                    try:
+                        opt = lb.locator(f'[role="option"]:text-is("{day}")').first
+                        opt.click(force=True)
+                        day_selected = True
+                        break
+                    except:
+                        continue
             page.wait_for_timeout(1)
             for lb in []:
                 if lb.is_visible():
@@ -976,7 +1082,7 @@ class PlaywrightWorkerController:
 # Màn hình check sau bước Captcha & Hoàn tất Duy trì đăng nhập (Stay signed in) để log vào hộp thư luôn
             is_success = False
             ws(6, "Đang hoàn tất đăng nhập (Stay signed in)...")
-            for _ in range(40):
+            for _ in range(60):
                 page.wait_for_timeout(500)
                 try:
                     # 1. Click "Yes" trên màn hình Duy trì đăng nhập (Stay signed in) nếu xuất hiện
@@ -990,8 +1096,17 @@ class PlaywrightWorkerController:
                         except:
                             pass
                         kmsi_btn.click()
+                        page.wait_for_timeout(3000)
                         log("Đã click 'Yes' trên màn hình Duy trì đăng nhập.", "INFO", worker_id)
-                        page.wait_for_timeout(2000)
+                    elif _ == 40:
+                        try:
+                            fallback_btn = page.locator('input[type="submit"], button[type="submit"], #idSIButton9').first
+                            if fallback_btn.is_visible():
+                                fallback_btn.click(force=True)
+                                page.wait_for_timeout(3000)
+                                log("Đã thử force click nút submit KMSI làm fallback.", "WARN", worker_id)
+                        except Exception:
+                            pass
 
                     # 2. Kiểm tra xem đã vào đến Inbox chưa
                     current_url = page.url.lower()
@@ -1053,6 +1168,29 @@ def get_modern_firefox_config():
 def get_browser_profile(browser_engine="chromium"):
     """Lấy cấu hình browser desktop/desktop responsive để giảm khả năng bị phát hiện."""
     import random
+    mobile_chromium_profiles = [
+        {
+            "ua": "Mozilla/5.0 (Linux; Android 14; Pixel 8 Pro) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Mobile Safari/537.36",
+            "viewport": {"width": 412, "height": 915},
+            "device_scale_factor": 2.625,
+            "is_mobile": True,
+            "has_touch": True,
+        },
+        {
+            "ua": "Mozilla/5.0 (Linux; Android 13; SM-S918B) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Mobile Safari/537.36",
+            "viewport": {"width": 384, "height": 854},
+            "device_scale_factor": 2.75,
+            "is_mobile": True,
+            "has_touch": True,
+        },
+        {
+            "ua": "Mozilla/5.0 (iPhone; CPU iPhone OS 17_5 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) CriOS/126.0.6478.108 Mobile/15E148 Safari/604.1",
+            "viewport": {"width": 390, "height": 844},
+            "device_scale_factor": 3,
+            "is_mobile": True,
+            "has_touch": True,
+        },
+    ]
     chromium_profiles = [
         {
             "ua": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
@@ -1104,7 +1242,11 @@ def get_browser_profile(browser_engine="chromium"):
             "has_touch": False
         },
     ]
-    return random.choice(firefox_profiles if browser_engine == "firefox" else chromium_profiles)
+    if browser_engine == "firefox":
+        return random.choice(firefox_profiles)
+    if CONFIG.get("mobile_view", True):
+        return random.choice(mobile_chromium_profiles)
+    return random.choice(chromium_profiles)
 
 def register_one_outlook(worker_id, account_index, assigned_proxy):
     email = random_email()
@@ -1134,7 +1276,7 @@ def register_one_outlook(worker_id, account_index, assigned_proxy):
     refresh_token = ""
     controller = PlaywrightWorkerController(assigned_proxy)
     try:
-        ws(1, "Khoi tao Chromium...")
+        ws(1, "Khoi tao Camoufox Firefox...")
         browser = controller.get_browser()
         browser_engine = getattr(controller, "browser_type", "chromium")
         browser_profile = get_browser_profile(browser_engine)
@@ -1166,10 +1308,19 @@ def register_one_outlook(worker_id, account_index, assigned_proxy):
             context_options["device_scale_factor"] = 1
             log(f"Khởi tạo Firefox Desktop Responsive với User-Agent chuẩn: {context_options['user_agent'][:60]}...", "INFO", worker_id)
         else:
-            log(f"Khởi tạo Chromium Desktop với User-Agent: {browser_profile['ua'][:55]}...", "INFO", worker_id)
             context_options["device_scale_factor"] = browser_profile.get("device_scale_factor", 1)
             context_options["is_mobile"] = browser_profile.get("is_mobile", False)
             context_options["has_touch"] = browser_profile.get("has_touch", False)
+            if context_options["is_mobile"]:
+                context_options["screen"] = browser_profile["viewport"]
+                viewport = browser_profile["viewport"]
+                log(
+                    f"Khoi tao Chromium Mobile viewport {viewport['width']}x{viewport['height']} voi User-Agent: {browser_profile['ua'][:55]}...",
+                    "INFO",
+                    worker_id,
+                )
+            else:
+                log(f"Khoi tao Chromium Desktop voi User-Agent: {browser_profile['ua'][:55]}...", "INFO", worker_id)
 
         if browser_engine == "firefox":
             # Khi chạy Firefox, loại bỏ hoàn toàn các flag mobile không hỗ trợ
@@ -1473,6 +1624,9 @@ def worker_loop(worker_id, q, total_accounts):
     log(f"Worker {worker_id:02d} khoi dong.", "INFO", worker_id)
     proxies = get_parent_proxy()
 
+    def ws(num, msg):
+        log(msg, "STEP", worker_id)
+
     while not should_stop:
         if is_paused:
             time.sleep(0.5)
@@ -1482,20 +1636,49 @@ def worker_loop(worker_id, q, total_accounts):
         try:
             task_data = q.get(timeout=1.0)
         except queue.Empty:
-            if total_accounts > 0 and q.empty():
-                break
             continue
         account_idx = task_data["index"]
 
-        # Phan bo proxy
-        assigned_proxy = ""
-        if proxies:
-            assigned_proxy = select_fast_proxy(proxies, worker_id)
+        # ========================================================
+        # TIẾN TRÌNH THAY ĐỔI ĐỊNH TUYẾN MẠNG QUA EXPRESSVPN
+        # ========================================================
+        ws(1, "Đang xoay địa chỉ IP VPN...")
 
-        log(f"Bat dau dang ky account thu #{account_idx}...", "INFO", worker_id)
-        success = run_registration_isolated(worker_id, account_idx, assigned_proxy)
-        if assigned_proxy and not success:
-            forget_live_proxy(assigned_proxy)
+        # Gọi hàm change_ip() đồng bộ thread-safe đã viết sẵn trong vpn_manager.
+        # Nếu Worker 1 đang chạy lệnh disconnect/connect, Worker 2 đến đây sẽ tự động
+        # rơi vào trạng thái ngủ chờ (sleep 2s) cho đến khi mạng ổn định hoàn toàn.
+        vpn_success = vpn_orchestrator.change_ip()
+
+        if vpn_success:
+            # Truy vấn lại IP public thực tế sau khi đổi để ghi nhận nhật ký
+            new_global_ip = vpn_orchestrator.get_public_ip()
+            log(f"Xoay IP toàn hệ thống hoàn tất. Địa chỉ hiện tại: {new_global_ip}", "SUCCESS", worker_id)
+
+            # Đồng bộ thông tin IP mới lên hàng tương ứng trên bảng GUI trạng thái
+            with lock:
+                workers[worker_id - 1]["proxy"] = f"VPN: {new_global_ip[:15]}"
+        else:
+            log("Yêu cầu thay đổi IP qua ExpressVPN CLI bị từ chối hoặc hết thời gian chờ.", "WARN", worker_id)
+            q.put(task_data)  # Đẩy ngược tài khoản lại hàng đợi để xử lý sau
+            q.task_done()
+            time.sleep(3)
+            continue
+
+        # Sau khi toàn bộ máy tính đã được bao bọc bởi dải IP sạch mới của VPN, tiến hành tạo tài khoản
+        log(f"Bắt đầu đăng ký account thứ #{account_idx}...", "INFO", worker_id)
+
+        # QUAN TRỌNG: Vì mạng máy tính đã ăn theo VPN, bạn bắt buộc phải truyền proxy
+        # trống "" vào hàm khởi chạy Playwright để nó chạy ở chế độ mạng DIRECT sạch.
+        success = run_registration_isolated(worker_id, account_idx, assigned_proxy="")
+
+        # Nếu kịch bản đăng ký trả về kết quả thất bại, tăng bộ đếm lỗi để ép đổi IP ở chu kỳ sau
+        if not success:
+            is_threshold_reached = vpn_orchestrator.increment_fail()
+            if is_threshold_reached:
+                log("Đạt ngưỡng hạn định lỗi liên tiếp. Kích hoạt dọn dẹp cấu hình IP cho lượt tới.", "WARN", worker_id)
+        else:
+            vpn_orchestrator.reset_fail()
+
         q.task_done()
 
         if CONFIG["bot_protection_wait"] > 0 and not should_stop:
@@ -1769,10 +1952,10 @@ def start_gui():
     opt_browser = ctk.CTkOptionMenu(
         row2, height=28, fg_color=PANEL_ALT, button_color=PRIMARY,
         button_hover_color=PRIMARY_HOVER, text_color=TEXT,
-        font=(MONO, 11), corner_radius=6, values=["chromium"]
+        font=(MONO, 11), corner_radius=6, values=["firefox"]
     )
     opt_browser.grid(row=0, column=3, padx=(4, 15), sticky="ew")
-    opt_browser.set("chromium")
+    opt_browser.set("firefox")
 
     label(row2, "Thử captcha:", 11, TEXT, "bold").grid(row=0, column=4, sticky="w")
     ent_captcha_retries = entry(row2, 50)
@@ -1784,19 +1967,19 @@ def start_gui():
     ent_single_proxy.grid(row=0, column=7, padx=(4, 0), sticky="ew")
     ent_single_proxy.insert(0, str(CONFIG.get("proxy", "")))
 
-    # Row 3: optional Chromium executable path
+    # Row 3: optional Firefox executable path
     row3 = ctk.CTkFrame(config_frame, fg_color=BG, corner_radius=0)
     row3.grid(row=2, column=0, sticky="ew", padx=10, pady=(4, 8))
     row3.grid_columnconfigure(1, weight=1)
 
-    label(row3, "Chromium path:", 11, TEXT, "bold").grid(row=0, column=0, sticky="w")
-    ent_firefox = entry(row3, placeholder="Để trống để dùng Chromium mặc định của Playwright")
+    label(row3, "Firefox path:", 11, TEXT, "bold").grid(row=0, column=0, sticky="w")
+    ent_firefox = entry(row3, placeholder="De trong de dung Camoufox mac dinh")
     ent_firefox.grid(row=0, column=1, sticky="ew", padx=(8, 8))
     ent_firefox.insert(0, CONFIG.get("playwright", {}).get("browser_path", ""))
 
     def choose_firefox_path():
         path = filedialog.askopenfilename(
-            title="Chọn Chrome/Chromium executable",
+            title="Chon Firefox executable",
             filetypes=[("Browser executable", "*.exe"), ("All files", "*.*")]
         )
         if path:
@@ -1826,7 +2009,7 @@ def start_gui():
         CONFIG["bot_protection_wait"] = parse_float(ent_delay.get(), CONFIG.get("bot_protection_wait", 5.0), 0)
         CONFIG["headless"] = bool(chk_headless_var.get())
         CONFIG["use_parent_proxies"] = bool(chk_parent_proxies_var.get())
-        CONFIG["choose_browser"] = "chromium"
+        CONFIG["choose_browser"] = "firefox"
         CONFIG["max_captcha_retries"] = parse_int(ent_captcha_retries.get(), CONFIG.get("max_captcha_retries", 3), 0)
         CONFIG["proxy"] = ent_single_proxy.get().strip()
         CONFIG["timeout_secs"] = parse_int(ent_timeout.get(), CONFIG.get("timeout_secs", 20), 5)
@@ -1834,7 +2017,7 @@ def start_gui():
 
         if "playwright" not in CONFIG:
             CONFIG["playwright"] = {}
-        CONFIG["playwright"]["browser_path"] = normalize_chromium_browser_path(ent_firefox.get().strip())
+        CONFIG["playwright"]["browser_path"] = normalize_firefox_browser_path(ent_firefox.get().strip())
         save_config()
 
     def action_run():

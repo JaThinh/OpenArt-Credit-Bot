@@ -3,5 +3,10 @@ camoufox
 Faker
 httpx
 playwright
+pynput
 requests
 temp-mail
+patchright
+patchright[cli]
+black
+flake8

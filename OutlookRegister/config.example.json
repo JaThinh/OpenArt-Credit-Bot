@@ -1,5 +1,5 @@
 {
-  "choose_browser": "chromium",
+  "choose_browser": "firefox",
   "email_suffix": "@hotmail.com",
   "proxy": "",
   "use_parent_proxies": false,
@@ -8,6 +8,7 @@
   "concurrent_flows": 1,
   "max_tasks": 1000,
   "headless": false,
+  "mobile_view": true,
   "timeout_secs": 45,
   "proxies": [],
   "oauth2": {
@@ -19,8 +20,16 @@
       "https://graph.microsoft.com/Mail.ReadWrite"
     ]
   },
-  "playwright": {
-    "browser_path": ""
-  },
+ "playwright": {
+  "browser_path": "",
+  "antidetect": {
+    "enabled": true,
+    "provider": "adspower",
+    "profile_id": "your_profile_id",
+    "local_api": "http://local.adspower.net:50325",
+    "api_key": "your_api_key_if_enabled",
+    "api_key_header": "Authorization"
+  }
+},
   "SIGNUP_URL": "https://signup.live.com/signup?lic=1"
 }

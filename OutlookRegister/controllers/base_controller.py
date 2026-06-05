@@ -272,15 +272,25 @@ class BaseBrowserController(ABC):
                 except Exception as screenshot_err:
                     print(f"[-] Khong chup duoc screenshot debug: {screenshot_err}")
                 raise
-            if self.email_suffix == "@hotmail.com":
-                try:
-                    page.get_by_text("@outlook.com").click(timeout=5000)
-                    page.locator(f'[role="option"]:text-is("@hotmail.com")').click()
-                except:
-                    pass
-
             email_input = page.locator(EMAIL_INPUT_SELECTOR).first
             email_input.fill(email)
+
+            # Chọn đúng miền nếu trang có dropdown/gợi ý miền email
+            try:
+                if self.email_suffix == "@outlook.com":
+                    page.get_by_text("@outlook.com").click(timeout=3000)
+                elif self.email_suffix == "@hotmail.com":
+                    try:
+                        page.get_by_text("@outlook.com").click(timeout=3000)
+                    except Exception:
+                        pass
+                    try:
+                        page.locator('[role="option"]:text-is("@hotmail.com")').click(timeout=3000)
+                    except Exception:
+                        pass
+            except Exception:
+                pass
+
             page.locator('button[type="submit"]').click()
             page.wait_for_timeout(1500)
 
@@ -347,7 +357,14 @@ class BaseBrowserController(ABC):
             page.wait_for_timeout(500)
 
             # Click Next
-            page.locator('button[type="submit"]').click()
+            submit_btn = page.locator('button[type="submit"]').first
+            try:
+                submit_btn.click(timeout=5000)
+            except Exception:
+                try:
+                    submit_btn.click(force=True, timeout=5000)
+                except Exception:
+                    page.keyboard.press('Enter')
             page.wait_for_timeout(1500)
 
             # === BƯỚC 4: NHẬP HỌ TÊN (ADD NAME) ===
@@ -360,7 +377,14 @@ class BaseBrowserController(ABC):
             if time.time() - start_time < self.wait_time / 1000:
                 page.wait_for_timeout(self.wait_time - (time.time() - start_time) * 1000)
 
-            page.locator('button[type="submit"]').click()
+            submit_btn = page.locator('button[type="submit"]').first
+            try:
+                submit_btn.click(timeout=5000)
+            except Exception:
+                try:
+                    submit_btn.click(force=True, timeout=5000)
+                except Exception:
+                    page.keyboard.press('Enter')
 
             # Đợi load qua trang xác thực
             ws(6, "Cho he thong hoan thanh xac thuc...")
